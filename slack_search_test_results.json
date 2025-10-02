@@ -1,0 +1,248 @@
+[
+  {
+    "query": "hello",
+    "description": "Baseline: Single term",
+    "success": true,
+    "count": 11
+  },
+  {
+    "query": "index",
+    "description": "Baseline: Second term",
+    "success": true,
+    "count": 6
+  },
+  {
+    "query": "hello index",
+    "description": "Two terms (implicit AND?)",
+    "success": true,
+    "count": 2
+  },
+  {
+    "query": "hello -index",
+    "description": "NOT with dash (known working)",
+    "success": true,
+    "count": 9
+  },
+  {
+    "query": "-index",
+    "description": "NOT alone with dash",
+    "success": true,
+    "count": 219
+  },
+  {
+    "query": "hello AND index",
+    "description": "AND (uppercase)",
+    "success": true,
+    "count": 2
+  },
+  {
+    "query": "hello and index",
+    "description": "and (lowercase)",
+    "success": true,
+    "count": 2
+  },
+  {
+    "query": "hello && index",
+    "description": "AND with &&",
+    "success": true,
+    "count": 2
+  },
+  {
+    "query": "hello & index",
+    "description": "AND with &",
+    "success": true,
+    "count": 2
+  },
+  {
+    "query": "hello + index",
+    "description": "AND with +",
+    "success": true,
+    "count": 2
+  },
+  {
+    "query": "hello OR index",
+    "description": "OR (uppercase)",
+    "success": true,
+    "count": 2
+  },
+  {
+    "query": "hello or index",
+    "description": "or (lowercase)",
+    "success": true,
+    "count": 2
+  },
+  {
+    "query": "hello || index",
+    "description": "OR with ||",
+    "success": true,
+    "count": 2
+  },
+  {
+    "query": "hello | index",
+    "description": "OR with |",
+    "success": true,
+    "count": 2
+  },
+  {
+    "query": "hello XOR index",
+    "description": "XOR (uppercase)",
+    "success": true,
+    "count": 2
+  },
+  {
+    "query": "hello xor index",
+    "description": "xor (lowercase)",
+    "success": true,
+    "count": 2
+  },
+  {
+    "query": "hello ^ index",
+    "description": "XOR with ^",
+    "success": true,
+    "count": 2
+  },
+  {
+    "query": "hello NOT index",
+    "description": "NOT (uppercase)",
+    "success": true,
+    "count": 9
+  },
+  {
+    "query": "hello not index",
+    "description": "not (lowercase)",
+    "success": true,
+    "count": 2
+  },
+  {
+    "query": "hello !index",
+    "description": "NOT with !",
+    "success": true,
+    "count": 2
+  },
+  {
+    "query": "(hello index)",
+    "description": "Parentheses grouping",
+    "success": true,
+    "count": 2
+  },
+  {
+    "query": "(hello OR index) document",
+    "description": "Parentheses with OR",
+    "success": true,
+    "count": 2
+  },
+  {
+    "query": "\"hello index\"",
+    "description": "Exact phrase (quotes)",
+    "success": true,
+    "count": 0
+  },
+  {
+    "query": "hello*",
+    "description": "Wildcard with *",
+    "success": true,
+    "count": 11
+  },
+  {
+    "query": "*hello",
+    "description": "Wildcard prefix",
+    "success": true,
+    "count": 11
+  },
+  {
+    "query": "hello?",
+    "description": "Wildcard with ?",
+    "success": true,
+    "count": 11
+  },
+  {
+    "query": "hello -index -document",
+    "description": "Multiple NOT operators",
+    "success": true,
+    "count": 8
+  },
+  {
+    "query": "hello index document",
+    "description": "Three terms",
+    "success": true,
+    "count": 2
+  },
+  {
+    "query": "in:#general hello",
+    "description": "in: operator (channel)",
+    "success": true,
+    "count": 0
+  },
+  {
+    "query": "from:@user hello",
+    "description": "from: operator",
+    "success": true,
+    "count": 0
+  },
+  {
+    "query": "has:link hello",
+    "description": "has: operator (link)",
+    "success": true,
+    "count": 1
+  },
+  {
+    "query": "has:star hello",
+    "description": "has: operator (star)",
+    "success": true,
+    "count": 0
+  },
+  {
+    "query": "has:pin hello",
+    "description": "has: operator (pin)",
+    "success": true,
+    "count": 0
+  },
+  {
+    "query": "has:reaction hello",
+    "description": "has: operator (reaction)",
+    "success": true,
+    "count": 4
+  },
+  {
+    "query": "before:2024-01-01 hello",
+    "description": "before: date operator",
+    "success": true,
+    "count": 0
+  },
+  {
+    "query": "after:2024-01-01 hello",
+    "description": "after: date operator",
+    "success": true,
+    "count": 11
+  },
+  {
+    "query": "during:january hello",
+    "description": "during: operator",
+    "success": true,
+    "count": 0
+  },
+  {
+    "query": "on:2024-01-01 hello",
+    "description": "on: date operator",
+    "success": true,
+    "count": 0
+  },
+  {
+    "query": "HELLO",
+    "description": "UPPERCASE term",
+    "success": true,
+    "count": 11
+  },
+  {
+    "query": "hello",
+    "description": "lowercase term",
+    "success": true,
+    "count": 11
+  },
+  {
+    "query": "Hello",
+    "description": "Capitalized term",
+    "success": true,
+    "count": 11
+  }
+]
