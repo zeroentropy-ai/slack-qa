@@ -7,6 +7,14 @@ from urllib.parse import urlparse
 from requests_toolbelt.multipart.encoder import MultipartEncoder
 
 class SlackArchiver:
+    # Global counters
+    api_call_counter = 0
+    api_call_log = []
+    
+    # Retry settings
+    MAX_RETRIES = 3
+    BASE_BACKOFF = 2  # seconds
+    
     def __init__(self, token, auth_mode='app', cookies=None, workspace_url=None):
         """
         Initialize archiver with authentication mode
@@ -20,7 +28,6 @@ class SlackArchiver:
         self.token = token
         self.auth_mode = auth_mode
         self.cookies = cookies
-        self.workspace_url = workspace_url.rstrip('/') if workspace_url else None
         
         if auth_mode == 'app':
             self.headers = {"Authorization": f"Bearer {token}"}
@@ -43,12 +50,63 @@ class SlackArchiver:
                 return urllib.parse.unquote(cookie[2:])
         return None
     
+    def _log_api_call(self, endpoint, params=None, retry_attempt=0):
+        """Log each API call"""
+        SlackArchiver.api_call_counter += 1
+        retry_str = f" (retry {retry_attempt}/{self.MAX_RETRIES})" if retry_attempt > 0 else ""
+        log_msg = f"🔌 API Call #{SlackArchiver.api_call_counter}: {endpoint}{retry_str}"
+        if params:
+            # Log key params (not full data for brevity)
+            key_params = {k: v for k, v in params.items() if k in ['channel', 'ts', 'cursor', 'limit']}
+            if key_params:
+                log_msg += f" | params: {key_params}"
+        print(log_msg)
+        
+        SlackArchiver.api_call_log.append({
+            'call_number': SlackArchiver.api_call_counter,
+            'endpoint': endpoint,
+            'params': params,
+            'timestamp': datetime.now().isoformat(),
+            'retry_attempt': retry_attempt
+        })
+    
     def _api_call(self, endpoint, params=None, method='GET'):
-        """Make API call with appropriate authentication"""
-        if self.auth_mode == 'app':
-            return self._api_call_app(endpoint, params, method)
-        else:
-            return self._api_call_browser(endpoint, params, method)
+        """Make API call with appropriate authentication and retry logic"""
+        for attempt in range(self.MAX_RETRIES + 1):
+            self._log_api_call(endpoint, params, retry_attempt=attempt)
+            
+            if self.auth_mode == 'app':
+                response, data = self._api_call_app(endpoint, params, method)
+            else:
+                response, data = self._api_call_browser(endpoint, params, method)
+            
+            # Check if successful
+            if data.get('ok'):
+                time.sleep(0.5)  # Rate limit protection
+                return data
+            
+            # Handle errors
+            error = data.get('error', 'unknown_error')
+            
+            if error == 'ratelimited':
+                # Get retry-after header or use exponential backoff
+                retry_after = int(response.headers.get('Retry-After', self.BASE_BACKOFF * (2 ** attempt)))
+                print(f"   ⏸️  Rate limited! Waiting {retry_after}s before retry...")
+                time.sleep(retry_after)
+                continue
+            
+            elif attempt < self.MAX_RETRIES:
+                # Exponential backoff for other errors
+                backoff = self.BASE_BACKOFF * (2 ** attempt)
+                print(f"   ⚠️  Error '{error}' - retrying in {backoff}s...")
+                time.sleep(backoff)
+                continue
+            else:
+                # Max retries reached
+                print(f"   ❌ Failed after {self.MAX_RETRIES} retries: {error}")
+                return data
+        
+        return {'ok': False, 'error': 'max_retries_exceeded'}
     
     def _api_call_app(self, endpoint, params=None, method='GET'):
         """Make API call with OAuth app token"""
@@ -66,13 +124,7 @@ class SlackArchiver:
             )
         
         data = response.json()
-        
-        if not data.get('ok'):
-            print(f"❌ Error on {endpoint}: {data.get('error')}")
-            return data
-        
-        time.sleep(0.5)
-        return data
+        return response, data
     
     def _api_call_browser(self, endpoint, params=None, method='GET'):
         """Make API call with browser session tokens"""
@@ -107,11 +159,6 @@ class SlackArchiver:
             "fp": "a2"
         }
         
-        # Extract workspace ID from URL for slack_route
-        if self.workspace_url:
-            # This may need adjustment based on actual workspace structure
-            query_params["slack_route"] = "T031JJZ7Q6T"  # You might need to extract this dynamically
-        
         response = requests.post(
             f"{self.base_url}/{endpoint}",
             headers=headers,
@@ -120,13 +167,7 @@ class SlackArchiver:
         )
         
         data = response.json()
-        
-        if not data.get('ok'):
-            print(f"❌ Error on {endpoint}: {data.get('error')}")
-            return data
-        
-        time.sleep(0.5)
-        return data
+        return response, data
     
     def download_file(self, url, filepath):
         """Download a file from Slack"""
@@ -152,22 +193,22 @@ class SlackArchiver:
     
     def get_users(self):
         """Get all users"""
-        print("📥 Fetching users...")
+        print("\n📥 Fetching users...")
         return self._api_call('users.list')
     
     def get_team_info(self):
         """Get workspace info"""
-        print("📥 Fetching team info...")
+        print("\n📥 Fetching team info...")
         return self._api_call('team.info')
     
     def get_emoji(self):
         """Get custom emoji"""
-        print("📥 Fetching custom emoji...")
+        print("\n📥 Fetching custom emoji...")
         return self._api_call('emoji.list')
     
     def get_channels(self):
         """Get all channels"""
-        print("📥 Fetching channels...")
+        print("\n📥 Fetching channels...")
         channels = []
         cursor = None
         
@@ -273,6 +314,8 @@ class SlackArchiver:
         """Archive entire workspace"""
         
         print(f"🔐 Authentication mode: {self.auth_mode}")
+        print(f"🔄 Max retries: {self.MAX_RETRIES}")
+        print(f"⏱️  Base backoff: {self.BASE_BACKOFF}s")
         
         # Get team info first to determine workspace name
         team_info = self.get_team_info()
@@ -328,7 +371,9 @@ class SlackArchiver:
             elif channel.get('is_mpim'):
                 channel_name = f"group_dm_{channel_id}"
             
-            print(f"\n[{i}/{len(channels)}] 💬 Processing #{channel_name}...")
+            print(f"\n{'='*60}")
+            print(f"[{i}/{len(channels)}] 💬 Processing #{channel_name}...")
+            print(f"{'='*60}")
             
             # Get members
             members = self.get_channel_members(channel_id)
@@ -345,9 +390,15 @@ class SlackArchiver:
                 print(f"   🔖 {len(bookmarks)} bookmarks")
             
             # Get messages
+            print(f"   📨 Fetching message history...")
             messages = self.get_channel_history(channel_id)
+            print(f"   ✅ Retrieved {len(messages)} messages")
             
             # Get thread replies
+            thread_count = sum(1 for m in messages if m.get('thread_ts') and m.get('reply_count', 0) > 0 and m.get('ts') == m.get('thread_ts'))
+            if thread_count > 0:
+                print(f"   🧵 Fetching {thread_count} threads...")
+            
             threads_fetched = 0
             for message in messages:
                 if message.get('thread_ts') and message.get('reply_count', 0) > 0:
@@ -355,6 +406,8 @@ class SlackArchiver:
                         replies = self.get_thread_replies(channel_id, message['thread_ts'])
                         message['thread_replies'] = replies
                         threads_fetched += 1
+                        if threads_fetched % 10 == 0:
+                            print(f"      Progress: {threads_fetched}/{thread_count} threads")
             
             # Extract files
             channel_files = self.extract_files_from_messages(messages)
@@ -375,7 +428,7 @@ class SlackArchiver:
             with open(f'{channel_dir}/{safe_name}.json', 'w', encoding='utf-8') as f:
                 json.dump(channel_data, f, indent=2, ensure_ascii=False)
             
-            print(f"   ✅ {len(messages)} messages, {threads_fetched} threads, {len(channel_files)} files")
+            print(f"   ✅ Saved: {len(messages)} messages, {threads_fetched} threads, {len(channel_files)} files")
         
         # 6. Download files
         if download_files and all_files:
@@ -401,16 +454,25 @@ class SlackArchiver:
             'workspace_name': workspace_name,
             'workspace_id': workspace_id,
             'total_channels': len(channels),
-            'total_files': len(all_files)
+            'total_files': len(all_files),
+            'total_api_calls': SlackArchiver.api_call_counter
         }
         with open(f'{workspace_dir}/metadata.json', 'w', encoding='utf-8') as f:
             json.dump(metadata, f, indent=2)
         
-        print(f"\n🎉 Archive complete! Saved to '{workspace_dir}/'")
+        # Save API call log
+        with open(f'{workspace_dir}/api_call_log.json', 'w', encoding='utf-8') as f:
+            json.dump(SlackArchiver.api_call_log, f, indent=2)
+        
+        print(f"\n{'='*60}")
+        print(f"🎉 Archive complete! Saved to '{workspace_dir}/'")
+        print(f"{'='*60}")
         print(f"📊 Summary:")
         print(f"   - Workspace: {workspace_name}")
-        print(f"   - {len(channels)} channels")
-        print(f"   - {len(all_files)} files")
+        print(f"   - Channels: {len(channels)}")
+        print(f"   - Files: {len(all_files)}")
+        print(f"   - Total API calls: {SlackArchiver.api_call_counter}")
+        print(f"   - API call log saved to: api_call_log.json")
 
 # ============================================
 # USAGE EXAMPLES
