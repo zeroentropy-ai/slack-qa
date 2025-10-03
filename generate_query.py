@@ -6,6 +6,8 @@ from enum import Enum
 import tiktoken
 import anthropic
 import openai
+import random
+from dotenv import load_dotenv
 from pathlib import Path
 
 # ============================================
@@ -102,7 +104,6 @@ class SyntheticQuery:
     query_text: str
     chunk_id: str
     persona: str  # "technical_expert", "beginner", "typo_prone", etc.
-    difficulty: str  # "easy", "medium", "hard"
     metadata: Dict[str, Any]
 
 # ============================================
@@ -117,8 +118,8 @@ class SyntheticQuery:
 class SlackChunker:
     """Create chunks from cleaned Slack data"""
     
-    def __init__(self, model: str = "gpt-4"):
-        self.encoder = tiktoken.encoding_for_model(model)
+    def __init__(self, provider="anthropic"):
+        self.encoder = tiktoken.encoding_for_model(model) if provider == "anthropic" else 
         self.max_tokens = 4096
     
     def count_tokens(self, text: str) -> int:
@@ -643,34 +644,32 @@ class QueryGenerator:
         }
     }
     
-    def __init__(self, api_key: str, provider: str = "anthropic"):
-        """
-        provider: "anthropic" or "openai"
-        """
+    def __init__(self, api_key: str, provider: str = "anthropic", max_query_tokens: int = 2000):
+        assert provider in ["openai", "anthropic"], "Unsupported LLM API"
         self.provider = provider
-        if provider == "anthropic":
-            self.client = anthropic.Anthropic(api_key=api_key)
-        else:
-            self.client = openai.OpenAI(api_key=api_key)
+        self.max_query_tokens = max_query_tokens
+        if provider == "anthropic": self.client = anthropic.Anthropic(api_key=api_key)
+        else: self.client = openai.OpenAI(api_key=api_key)
+        
     
     def generate_queries_for_chunk(
         self, 
         chunk: Chunk, 
         num_queries: int = 3,
-        channel_context: str = ""
+        channel_name_for_context: str = ""
     ) -> List[SyntheticQuery]:
         """Generate multiple queries for a single chunk with different personas"""
         queries = []
         
-        # Rotate through personas
+        # Randomly select personas (with replacement, so same persona can be picked multiple times)
         persona_list = list(self.PERSONAS.keys())
         
         for i in range(num_queries):
-            persona_name = persona_list[i % len(persona_list)]
+            persona_name = random.choice(persona_list)
             persona_config = self.PERSONAS[persona_name]
             
             query_text = self._generate_single_query(
-                chunk, persona_name, persona_config, channel_context
+                chunk, persona_name, persona_config, channel_name_for_context
             )
             
             if query_text:
@@ -679,7 +678,6 @@ class QueryGenerator:
                     query_text=query_text,
                     chunk_id=chunk.chunk_id,
                     persona=persona_name,
-                    difficulty=self._assess_difficulty(query_text, chunk.content),
                     metadata={
                         'chunk_type': chunk.chunk_type.value,
                         'channel_name': chunk.channel_name
@@ -688,44 +686,12 @@ class QueryGenerator:
         
         return queries
     
-    def _generate_single_query(
-        self, 
-        chunk: Chunk, 
-        persona_name: str, 
-        persona_config: Dict,
-        channel_context: str
-    ) -> str:
-        """Generate a single query using LLM"""
-        
-        system_prompt = f"""You are roleplaying as a user searching through Slack messages.
-
-PERSONA: {persona_name}
-{persona_config['description']}
-
-Your task is to generate a realistic search query that this user would write to find the information in the given Slack message(s).
-
-Guidelines:
-- Stay in character for this persona
-- The query should be a natural question someone would ask
-- The answer to the query MUST be contained in the provided message content
-- Make the query specific enough to be answerable but realistic
-- DO NOT directly copy phrases from the message
-- Output ONLY the query text, nothing else
-
-Channel context: {channel_context if channel_context else "General discussion channel"}
-"""
-
-        user_prompt = f"""Message content to create a query for:
-
-{chunk.content}
-
-Generate a query that this {persona_name} would write to find this information:"""
-
+    def _send_api_call(self, persona_config, system_prompt, user_prompt):
         try:
             if self.provider == "anthropic":
                 response = self.client.messages.create(
-                    model="claude-3-5-sonnet-20241022",
-                    max_tokens=200,
+                    model="claude-sonnet-4-5-20250929",
+                    max_tokens=self.max_query_tokens,
                     temperature=persona_config['temperature'],
                     system=system_prompt,
                     messages=[{
@@ -736,8 +702,8 @@ Generate a query that this {persona_name} would write to find this information:"
                 return response.content[0].text.strip()
             else:  # openai
                 response = self.client.chat.completions.create(
-                    model="gpt-4",
-                    max_tokens=200,
+                    model="gpt-5-mini",
+                    max_tokens=self.max_query_tokens,
                     temperature=persona_config['temperature'],
                     messages=[
                         {"role": "system", "content": system_prompt},
@@ -749,20 +715,40 @@ Generate a query that this {persona_name} would write to find this information:"
         except Exception as e:
             print(f"Error generating query: {e}")
             return None
-    
-    def _assess_difficulty(self, query: str, content: str) -> str:
-        """Simple heuristic to assess query difficulty"""
-        query_len = len(query.split())
-        content_len = len(content.split())
-        
-        # More complex logic could go here
-        if query_len < 5:
-            return "easy"
-        elif query_len < 15:
-            return "medium"
-        else:
-            return "hard"
 
+    def _generate_single_query(
+        self, 
+        chunk: Chunk, 
+        persona_name: str, 
+        persona_config: Dict,
+        channel_name_for_context: str
+    ) -> str:
+        """Generate a single query using LLM"""
+        
+        system_prompt = f"""You are roleplaying as a user searching through Slack messages.
+        PERSONA: {persona_name}
+        {persona_config['description']}
+
+        Your task is to generate a realistic search query that this user would write to find the information in the given Slack message(s).
+
+        Guidelines:
+        - Stay in character for this persona
+        - The query should be a natural question someone would ask
+        - The answer to the query MUST be contained in the provided message content
+        - Make the query specific enough to be answerable but realistic
+        - DO NOT directly copy phrases from the message
+        - Output ONLY the query text, nothing else
+
+        Channel context: {channel_name_for_context if channel_name_for_context else "General discussion channel"}
+        """
+
+        user_prompt = f"""Message content to create a query for:
+
+        {chunk.content}
+
+        Generate a query that this {persona_name} would write to find this information:"""
+        self._send_api_call(persona_config, system_prompt, user_prompt,)
+    
 # ============================================
 # 5. VALIDATOR: Ensure Query-Chunk Relevance
 # ============================================
@@ -909,7 +895,7 @@ class SyntheticDataPipeline:
             queries = self.query_generator.generate_queries_for_chunk(
                 chunk, 
                 num_queries=self.queries_per_chunk,
-                channel_context=f"#{chunk.channel_name}"
+                channel_name_for_context=f"#{chunk.channel_name}"
             )
             all_queries.extend(queries)
         
@@ -938,7 +924,6 @@ class SyntheticDataPipeline:
                         'chunk_id': query.chunk_id,
                         'chunk_content': chunk.content,
                         'persona': query.persona,
-                        'difficulty': query.difficulty,
                         'metadata': query.metadata
                     })
         
@@ -958,12 +943,27 @@ class SyntheticDataPipeline:
 # 7. USAGE
 # ============================================
 
+def get_provider_and_api_key(provider="anthropic"):
+    # Get corresponding API key
+    if provider == "anthropic":
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY not found in .env file")
+    else:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY not found in .env file")
+    return provider, api_key
+
 if __name__ == "__main__":
+    # Load environment variables from .env file
+    load_dotenv()
+    provider, api_key = get_provider_and_api_key()
     pipeline = SyntheticDataPipeline(
         archive_dir="slack_archive",
         output_dir="synthetic_data",
-        api_key="your-anthropic-or-openai-key",
-        provider="anthropic",  # or "openai"
+        api_key=api_key,
+        provider=provider,
         queries_per_chunk=3
     )
     
