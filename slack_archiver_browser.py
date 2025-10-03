@@ -194,8 +194,26 @@ class SlackArchiver:
     def get_users(self):
         """Get all users"""
         print("\n📥 Fetching users...")
-        return self._api_call('users.list')
-    
+        users = []
+        cursor = None
+        params = {'limit': '200'}  # <- ADD THIS
+        
+        while True:
+            if cursor:
+                params['cursor'] = cursor
+            
+            data = self._api_call('users.list', params)
+            if data.get('ok'):
+                users.extend(data.get('members', []))
+            else:
+                break
+            
+            cursor = data.get('response_metadata', {}).get('next_cursor')
+            if not cursor:
+                break
+        
+        return {'ok': True, 'members': users}
+
     def get_team_info(self):
         """Get workspace info"""
         print("\n📥 Fetching team info...")
@@ -503,12 +521,16 @@ def archive_with_browser_session(xoxc_token, full_cookies, workspace_url):
 
 if __name__ == "__main__":
     XOXC_TOKEN = "xoxc-3052645262231-9641512460897-9626513329798-19e797687a5e0bb7539701cd740f4a9b3c98f040ebd6213e7f33577468f85c6d"
-
     FULL_COOKIES = "utm=%7B%7D; x=f3db5096c114fdcea90c10e9316228dc.1759448167; shown_ssb_redirect_page=1; OptanonConsent=isGpcEnabled=0&datestamp=Thu+Oct+02+2025+16%3A37%3A26+GMT-0700+(Pacific+Daylight+Time)&version=202402.1.0&browserGpcFlag=0&isIABGlobal=false&hosts=&consentId=1ff3be3e-e588-4932-9ac3-2630dd7c33aa&interactionCount=1&isAnonUser=1&landingPath=NotLandingPage&groups=1%3A1%2C3%3A1%2C2%3A1%2C4%3A1&AwaitingReconsent=false; _ga=GA1.1.221978663.1757447861; _ga_QTJQME5M5D=GS2.1.s1759448237$o4$g0$t1759448237$j60$l0$h0; PageCount=37; _cs_id=65bbed2f-e942-a0d8-ff58-7364edf3ae6f.1757447860.3.1759448237.1759448237.1.1791611860287.1.x; _cs_s=1.0.U.9.1759450037198; _li_ss=CkoKBgj5ARDvGwoFCAoQ7xsKBgjdARDvGwoGCOEBEO8bCgYIgQEQ7xsKBgiiARDvGwoJCP____8HEPkbCgYIiQEQ7xsKBgilARDvGw; cjConsent=MHxOfDB8Tnww; cjUser=7ca4c4b8-116d-45aa-ad4c-88a5d183fc3d; ssb_instance_id=b9822ad1-6df9-40d2-8374-d0b286d41559; d=xoxd-mqA7OJJlphk%2F%2FScObW0GkyuXX1uA9bx4okOK5v5k%2BTBnuVQhGvMED1cwV5mFJhAJzTMlL7rkS8aHZ8cLTdRlNLn4vwsnWc8boUtzbctLTUqDXDCBuU838gAWgdNiZwtN4InZpBxIPZVu4O3JSLRdDyiv%2F%2BUsV5KujC3wY56%2Bx4%2FpGgbshsgD6EyFIZMKf4hII4Hin8lhq%2BgzNtFWBXnQVVEHUyI%3D; no_download_ssb_banner=1; show_download_ssb_banner=1; shown_download_ssb_modal=1; lc=1759448208; _cs_cvars=%7B%226%22%3A%5B%22is_paid_plan%22%2C%22false%22%5D%7D; _fbp=fb.1.1759438148806.71444673446120306; optimizelySession=0; agentforce_chatID=; _gcl_au=1.1.536689637.1757447861.707819349.1759440091.1759440092; _lc2_fpi_js=e00b11ac9c9b--01k4r0wbxafwq3ab8a66d6tj9e; _li_dcdm_c=.slack.com; d-s=1758655485; _cs_c=0; _lc2_fpi=e00b11ac9c9b--01k4r0wbxafwq3ab8a66d6tj9e; tz=-420; b=.f3db5096c114fdcea90c10e9316228dc"
-
-    WORKSPACE_URL = "https://fluttercommunity.slack.com"
+    WORKSPACE_URL = "https://modallabscommunity.slack.com"
     modallabs = (XOXC_TOKEN, FULL_COOKIES, WORKSPACE_URL)
+
+    XOXC_TOKEN = "xoxc-571236512613-9632331502644-9657115562272-7c9b7cd1a20019191d210075710aed405c57b5996d1ebd189a92250049b2502f"
+    FULL_COOKIES = "utm=%7B%7D; x=f3db5096c114fdcea90c10e9316228dc.1759464157; d=xoxd-FkHkozQ8MnhQuM5fpzOHEahusVOcpub4d62vFVeb5WVCk7Nyc0dFRsd5VDSTkKqCdIeV8WDP506mN4BZSycUAA6%2FpNTFNFPgi86%2B8xdDKSqFyh3NcCFhz9z%2BVnGX%2BT40OXaZv2TYNJRkHEacWKKiGmxkt%2FS2AzPVFwtlPox8YcfuhYbTCAf5zm3j7tfRrYrpN92gCsAfE9vWTbyqhWm%2BWdx6UEk%3D; d-s=1759461750; _ga_QTJQME5M5D=GS2.1.s1759460948$o5$g0$t1759460948$j60$l0$h0; _cs_id=65bbed2f-e942-a0d8-ff58-7364edf3ae6f.1757447860.7.1759458693.1759458693.1.1791611860287.1.x; shown_ssb_redirect_page=1; OptanonConsent=isGpcEnabled=0&datestamp=Thu+Oct+02+2025+16%3A37%3A26+GMT-0700+(Pacific+Daylight+Time)&version=202402.1.0&browserGpcFlag=0&isIABGlobal=false&hosts=&consentId=1ff3be3e-e588-4932-9ac3-2630dd7c33aa&interactionCount=1&isAnonUser=1&landingPath=NotLandingPage&groups=1%3A1%2C3%3A1%2C2%3A1%2C4%3A1&AwaitingReconsent=false; _ga=GA1.1.221978663.1757447861; _li_ss=CkoKBgj5ARDvGwoFCAoQ7xsKBgjdARDvGwoGCOEBEO8bCgYIgQEQ7xsKBgiiARDvGwoJCP____8HEPkbCgYIiQEQ7xsKBgilARDvGw; cjConsent=MHxOfDB8Tnww; cjUser=7ca4c4b8-116d-45aa-ad4c-88a5d183fc3d; ssb_instance_id=b9822ad1-6df9-40d2-8374-d0b286d41559; no_download_ssb_banner=1; show_download_ssb_banner=1; shown_download_ssb_modal=1; lc=1759448208; _fbp=fb.1.1759438148806.71444673446120306; optimizelySession=0; agentforce_chatID=; _gcl_au=1.1.536689637.1757447861.707819349.1759440091.1759440092; _cs_c=0; _lc2_fpi=e00b11ac9c9b--01k4r0wbxafwq3ab8a66d6tj9e; tz=-420; b=.f3db5096c114fdcea90c10e9316228dc"
+    WORKSPACE_URL = "https://fluttercommunity.slack.com"
+    flutter = (XOXC_TOKEN, FULL_COOKIES, WORKSPACE_URL)
+
 
     # Choose which method to use:
     # archive_with_app_token()
-    archive_with_browser_session(*modallabs)
+    archive_with_browser_session(*flutter)
