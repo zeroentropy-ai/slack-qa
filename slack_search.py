@@ -6,7 +6,16 @@ Simple wrapper around Slack's search API for ML dataset generation.
 Usage:
     from slack_search import SlackSearch
     
-    search = SlackSearch(token="xoxe.xoxp-...")
+    # Browser mode (recommended)
+    search = SlackSearch(
+        token="xoxc-...",
+        auth_mode='browser',
+        cookies="full cookie string from browser",
+        workspace_url="https://yourworkspace.slack.com"
+    )
+    
+    # App mode (legacy)
+    search = SlackSearch(token="xoxp-...", auth_mode='app')
     
     # Search everything
     results = search.search("machine learning", search_type="all")
@@ -17,13 +26,15 @@ Usage:
     # Search with filters
     results = search.search("in:#general from:@john bug", search_type="messages")
 
-Required scope: search:read
+Required scope (app mode): search:read
+Browser mode: Requires xoxc token and full cookies from browser session
 """
 
 import requests
 import time
 from typing import Dict, List, Optional, Literal, Iterator
 from dataclasses import dataclass
+from requests_toolbelt.multipart.encoder import MultipartEncoder
 
 
 @dataclass
@@ -43,16 +54,47 @@ class SlackSearch:
     Simple wrapper around Slack's search API.
     
     Args:
-        token: Slack user token with search:read scope
+        token: Either xoxp (app) token or xoxc (browser) token
+        auth_mode: 'app' for OAuth app tokens, 'browser' for session tokens (default: 'browser')
+        cookies: Full cookie string from browser (required for browser mode)
+        workspace_url: Workspace URL like 'https://workspace.slack.com' (required for browser mode)
         rate_limit_delay: Delay between API calls in seconds (default: 3s for Tier 2)
     """
     
-    def __init__(self, token: str, rate_limit_delay: float = 3.0):
+    def __init__(
+        self,
+        token: str,
+        auth_mode: Literal['app', 'browser'] = 'browser',
+        cookies: Optional[str] = None,
+        workspace_url: Optional[str] = None,
+        rate_limit_delay: float = 3.0
+    ):
         self.token = token
-        self.headers = {"Authorization": f"Bearer {token}"}
-        self.base_url = "https://slack.com/api"
+        self.auth_mode = auth_mode
+        self.cookies = cookies
         self.rate_limit_delay = rate_limit_delay
         self._last_call_time = 0
+        
+        if auth_mode == 'app':
+            self.headers = {"Authorization": f"Bearer {token}"}
+            self.base_url = "https://slack.com/api"
+        elif auth_mode == 'browser':
+            if not cookies or not workspace_url:
+                raise ValueError("Browser mode requires both cookies and workspace_url")
+            self.base_url = f"{workspace_url}/api"
+            # Extract xoxd token from cookies if present
+            self.xoxd_token = self._extract_xoxd_from_cookies(cookies)
+        else:
+            raise ValueError("auth_mode must be 'app' or 'browser'")
+    
+    def _extract_xoxd_from_cookies(self, cookies: str) -> Optional[str]:
+        """Extract xoxd token from cookie string"""
+        for cookie in cookies.split('; '):
+            if cookie.startswith('d='):
+                # URL decode the xoxd token
+                import urllib.parse
+                return urllib.parse.unquote(cookie[2:])
+        return None
     
     def _rate_limit(self):
         """Simple rate limiting"""
@@ -62,13 +104,68 @@ class SlackSearch:
         self._last_call_time = time.time()
     
     def _api_call(self, endpoint: str, params: Dict) -> Dict:
-        """Make API call with rate limiting"""
+        """Make API call with rate limiting and appropriate authentication"""
         self._rate_limit()
         
+        if self.auth_mode == 'app':
+            return self._api_call_app(endpoint, params)
+        else:
+            return self._api_call_browser(endpoint, params)
+    
+    def _api_call_app(self, endpoint: str, params: Dict) -> Dict:
+        """Make API call with OAuth app token"""
         response = requests.get(
             f"{self.base_url}/{endpoint}",
             headers=self.headers,
             params=params
+        )
+        
+        data = response.json()
+        
+        if not data.get('ok'):
+            error = data.get('error', 'unknown_error')
+            raise Exception(f"Slack API error: {error}")
+        
+        return data
+    
+    def _api_call_browser(self, endpoint: str, params: Dict) -> Dict:
+        """Make API call with browser session tokens"""
+        # Prepare multipart form data
+        fields = {'token': self.token}
+        if params:
+            fields.update(params)
+        
+        multipart_data = MultipartEncoder(fields=fields)
+        
+        headers = {
+            "Accept": "*/*",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cookie": self.cookies,
+            "Content-Type": multipart_data.content_type,
+            "Origin": "https://app.slack.com",
+            "Referer": "https://app.slack.com/",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-site",
+        }
+        
+        # Query parameters
+        query_params = {
+            "_x_id": f"search-{int(time.time() * 1000)}",
+            "_x_version_ts": str(int(time.time())),
+            "_x_frontend_build_type": "current",
+            "_x_desktop_ia": "4",
+            "_x_gantry": "true",
+            "fp": "a2"
+        }
+        
+        response = requests.post(
+            f"{self.base_url}/{endpoint}",
+            headers=headers,
+            params=query_params,
+            data=multipart_data
         )
         
         data = response.json()
@@ -123,11 +220,11 @@ class SlackSearch:
         
         params = {
             'query': query,
-            'count': min(count, 100),
-            'page': min(page, 100),
+            'count': str(min(count, 100)),
+            'page': str(min(page, 100)),
             'sort': sort,
             'sort_dir': sort_dir,
-            'highlight': highlight
+            'highlight': str(highlight).lower()
         }
         
         # Call appropriate endpoint
@@ -231,19 +328,81 @@ class SlackSearch:
 
 
 # Convenience functions for quick access
-def search_messages(token: str, query: str, **kwargs) -> SearchResult:
+def search_messages(
+    query: str,
+    token: str = None,
+    auth_mode: str = 'browser',
+    cookies: str = None,
+    workspace_url: str = None,
+    **kwargs
+) -> SearchResult:
     """Quick function to search messages"""
-    searcher = SlackSearch(token)
+    searcher = SlackSearch(
+        token=token,
+        auth_mode=auth_mode,
+        cookies=cookies,
+        workspace_url=workspace_url
+    )
     return searcher.search(query, search_type="messages", **kwargs)
 
 
-def search_files(token: str, query: str, **kwargs) -> SearchResult:
+def search_files(
+    query: str,
+    token: str = None,
+    auth_mode: str = 'browser',
+    cookies: str = None,
+    workspace_url: str = None,
+    **kwargs
+) -> SearchResult:
     """Quick function to search files"""
-    searcher = SlackSearch(token)
+    searcher = SlackSearch(
+        token=token,
+        auth_mode=auth_mode,
+        cookies=cookies,
+        workspace_url=workspace_url
+    )
     return searcher.search(query, search_type="files", **kwargs)
 
 
-def search_all(token: str, query: str, **kwargs) -> SearchResult:
+def search_all(
+    query: str,
+    token: str = None,
+    auth_mode: str = 'browser',
+    cookies: str = None,
+    workspace_url: str = None,
+    **kwargs
+) -> SearchResult:
     """Quick function to search everything"""
-    searcher = SlackSearch(token)
+    searcher = SlackSearch(
+        token=token,
+        auth_mode=auth_mode,
+        cookies=cookies,
+        workspace_url=workspace_url
+    )
     return searcher.search(query, search_type="all", **kwargs)
+
+
+# Example usage
+if __name__ == "__main__":
+    # Browser mode example
+    XOXC_TOKEN = "xoxc-..."
+    FULL_COOKIES = "utm=%7B%7D; x=..."
+    WORKSPACE_URL = "https://yourworkspace.slack.com"
+    
+    search = SlackSearch(
+        token=XOXC_TOKEN,
+        auth_mode='browser',
+        cookies=FULL_COOKIES,
+        workspace_url=WORKSPACE_URL
+    )
+    
+    # Search for messages
+    results = search.search("machine learning", search_type="messages")
+    print(f"Found {results.total} results")
+    for msg in results.matches[:5]:
+        print(f"- {msg.get('text', '')[:100]}")
+    
+    # Paginate through all results
+    print("\nAll results:")
+    for i, msg in enumerate(search.search_all_pages("error", search_type="messages", max_results=10)):
+        print(f"{i+1}. {msg.get('text', '')[:80]}")

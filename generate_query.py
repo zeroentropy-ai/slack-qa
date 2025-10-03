@@ -875,67 +875,72 @@ class QueryGenerator:
 # 5. VALIDATOR: Ensure Query-Chunk Relevance
 # ============================================
 
+# ============================================
+# 5. VALIDATOR: Ensure Query-Chunk Relevance
+# ============================================
+
 class QueryValidator:
     """Validate that queries can actually be answered by their chunks"""
     
     def __init__(self, api_key: str, provider: str = "anthropic"):
         self.provider = provider
+        self.api_key = api_key
         if provider == "anthropic":
-            self.client = anthropic.Anthropic(api_key=api_key)
+            self.ai_model = AIModel(company="anthropic", model="claude-3-5-sonnet-20241022")
         else:
-            self.client = openai.OpenAI(api_key=api_key)
+            self.ai_model = AIModel(company="openai", model="gpt-4")
     
-    def validate_query(self, query: SyntheticQuery, chunk: Chunk) -> Tuple[bool, str]:
+    async def validate_query_async(self, query: SyntheticQuery, chunk: Chunk) -> Tuple[bool, str]:
         """
-        Validate if chunk contains answer to query
+        Validate if chunk contains answer to query (async version)
         Returns: (is_valid, reason)
         """
         
-        system_prompt = """You are a validator checking if a Slack message contains the answer to a query.
+        system_message = """You are a validator checking if a Slack message contains the answer to a query.
 
 Output ONLY a JSON object with this format:
 {"valid": true/false, "reason": "explanation"}
 
 Does the pair of the query and document constitute a reasonable query for the document? Does the document have meaningful content AND is the document relevant on at least some level to the query"""
 
-        user_prompt = f"""Query: {query.query_text}
+        user_message = f"""Query: {query.query_text}
 
 Message content:
 {chunk.content}
 
 Does this message contain the answer to the query?"""
 
+        messages = [
+            AIMessage(role="system", content=system_message),
+            AIMessage(role="user", content=user_message)
+        ]
+
         try:
-            if self.provider == "anthropic":
-                response = self.client.messages.create(
-                    model="claude-3-5-sonnet-20241022",
-                    max_tokens=150,
-                    temperature=0,
-                    system=system_prompt,
-                    messages=[{
-                        "role": "user",
-                        "content": user_prompt
-                    }]
-                )
-                result = json.loads(response.content[0].text.strip())
-            else:
-                response = self.client.chat.completions.create(
-                    model="gpt-4",
-                    max_tokens=150,
-                    temperature=0,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ]
-                )
-                result = json.loads(response.choices[0].message.content.strip())
+            # Define a response model for structured output
+            class ValidationResult(BaseModel):
+                valid: bool
+                reason: str
             
-            return result.get('valid', False), result.get('reason', '')
+            result = await ai_call(
+                model=self.ai_model,
+                messages=messages,
+                max_tokens=150,
+                temperature=0,
+                response_format=ValidationResult
+            )
+            
+            return result.valid, result.reason
         
         except Exception as e:
-            print(f"Validation error: {e}")
+            print(f"   ⚠️  Validation error: {e}")
             return False, f"Error: {e}"
-
+    
+    def validate_query(self, query: SyntheticQuery, chunk: Chunk) -> Tuple[bool, str]:
+        """
+        Synchronous wrapper for validation
+        """
+        return asyncio.run(self.validate_query_async(query, chunk))
+    
 # ============================================
 # 6. PIPELINE: Orchestrate Everything
 # ============================================
@@ -955,7 +960,7 @@ class SyntheticDataPipeline:
         self.output_dir = output_dir
         self.queries_per_chunk = queries_per_chunk
         
-        self.data_loader = SlackDataLoader(archive_dir)  # Changed from post_processor
+        self.data_loader = SlackDataLoader(archive_dir)
         self.chunker = SlackChunker(provider=provider, api_key=api_key)
         self.query_generator = QueryGenerator(api_key, provider)
         self.validator = QueryValidator(api_key, provider)
@@ -987,6 +992,48 @@ class SyntheticDataPipeline:
             all_queries.extend(result)
         
         return all_queries
+    
+    async def _validate_queries_batch_async(
+        self,
+        queries: list[SyntheticQuery],
+        chunk_lookup: dict[str, Chunk]
+    ) -> list[dict[str, Any]]:
+        """Validate multiple queries in parallel"""
+        
+        async def validate_single(query: SyntheticQuery) -> dict[str, Any] | None:
+            chunk = chunk_lookup.get(query.chunk_id)
+            if chunk is None:
+                return None
+            
+            is_valid, reason = await self.validator.validate_query_async(query, chunk)
+            
+            if is_valid:
+                return {
+                    'query': query.query_text,
+                    'chunk_id': query.chunk_id,
+                    'chunk_content': chunk.content,
+                    'persona': query.persona,
+                    'metadata': query.metadata,
+                    'validation_reason': reason
+                }
+            return None
+        
+        # Create tasks for all queries
+        tasks = [validate_single(query) for query in queries]
+        
+        # Execute all validations in parallel
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Filter out None and Exception results
+        validated_pairs = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                print(f"   ⚠️  Error validating query {i}: {result}")
+                continue
+            if result is not None:
+                validated_pairs.append(result)
+        
+        return validated_pairs
     
     def process_workspace(self, workspace_name: str, force_rechunk: bool = False):
         """Full pipeline for one workspace
@@ -1045,7 +1092,7 @@ class SyntheticDataPipeline:
                         f.write(json.dumps(chunk.to_dict()) + '\n')
                 print(f"   💾 Saved to {chunk_file}")
         
-        # Step 3: Generate queries (NOW PARALLEL!)
+        # Step 3: Generate queries (PARALLEL!)
         print("\n❓ Step 3: Generating synthetic queries...")
         
         # Sample chunks for query generation
@@ -1071,9 +1118,8 @@ class SyntheticDataPipeline:
         
         print(f"   ✅ Generated {len(all_queries)} queries")
         
-        # Step 4: Validate queries (you might want to parallelize this too)
+        # Step 4: Validate queries (NOW PARALLEL TOO!)
         print("\n✔️  Step 4: Validating query-chunk pairs...")
-        validated_pairs = []
         
         # Create chunk lookup
         chunk_lookup = {}
@@ -1081,21 +1127,21 @@ class SyntheticDataPipeline:
             for chunk in chunks:
                 chunk_lookup[chunk.chunk_id] = chunk
         
-        for i, query in enumerate(all_queries, 1):
-            if i % 10 == 0:
-                print(f"   Progress: {i}/{len(all_queries)} queries")
+        # Validate in batches to avoid overwhelming the system
+        validation_batch_size = 100  # Process 100 queries at a time
+        validated_pairs = []
+        
+        for i in range(0, len(all_queries), validation_batch_size):
+            batch = all_queries[i:i + validation_batch_size]
+            print(f"   Processing validation batch {i//validation_batch_size + 1}/{(len(all_queries) + validation_batch_size - 1)//validation_batch_size} ({len(batch)} queries)...")
             
-            chunk = chunk_lookup.get(query.chunk_id)
-            if chunk:
-                is_valid, reason = self.validator.validate_query(query, chunk)
-                if is_valid:
-                    validated_pairs.append({
-                        'query': query.query_text,
-                        'chunk_id': query.chunk_id,
-                        'chunk_content': chunk.content,
-                        'persona': query.persona,
-                        'metadata': query.metadata
-                    })
+            # Validate this batch in parallel
+            batch_validated = asyncio.run(
+                self._validate_queries_batch_async(batch, chunk_lookup)
+            )
+            validated_pairs.extend(batch_validated)
+            
+            print(f"   Progress: {min(i + validation_batch_size, len(all_queries))}/{len(all_queries)} queries processed")
         
         print(f"   ✅ {len(validated_pairs)}/{len(all_queries)} queries validated")
         
@@ -1147,7 +1193,7 @@ class SyntheticDataPipeline:
                 all_chunks[chunk_type] = []
         
         return all_chunks
-
+    
 # ============================================
 # 7. USAGE
 # ============================================
