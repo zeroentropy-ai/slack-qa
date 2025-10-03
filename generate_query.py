@@ -107,10 +107,96 @@ class SyntheticQuery:
     metadata: Dict[str, Any]
 
 # ============================================
-# 2. POST-PROCESSOR: Raw Slack → Cleaned Format
+# 2. DATA LOADER: Load Cleaned Slack Data
 # ============================================
 
-
+class SlackDataLoader:
+    """Load cleaned Slack data from channels_clean directory"""
+    
+    def __init__(self, archive_dir: str):
+        self.archive_dir = archive_dir
+    
+    def load_workspace(self, workspace_name: str) -> List[Channel]:
+        """Load all channels from a workspace"""
+        channels_clean_dir = f"{self.archive_dir}/{workspace_name}/channels-clean"
+        
+        if not os.path.exists(channels_clean_dir):
+            raise ValueError(f"Cleaned channels directory not found: {channels_clean_dir}")
+        
+        channels = []
+        for filename in os.listdir(channels_clean_dir):
+            if filename.endswith('.json'):
+                channel_path = f"{channels_clean_dir}/{filename}"
+                channel = self.load_channel(channel_path, filename)
+                if channel:
+                    channels.append(channel)
+        
+        return channels
+    
+    def load_channel(self, channel_path: str, filename: str) -> Optional[Channel]:
+        """Load a single channel from cleaned JSON file"""
+        with open(channel_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        channel_id = data.get('channel_id', 'unknown')
+        # Use filename (without .json) as channel name
+        channel_name = filename[:-5] if filename.endswith('.json') else filename
+        
+        messages = []
+        for raw_msg in data.get('messages', []):
+            message = self._parse_message(raw_msg)
+            if message:
+                messages.append(message)
+        
+        return Channel(
+            channel_id=channel_id,
+            channel_name=channel_name,
+            messages=messages
+        )
+    
+    def _parse_message(self, raw_msg: Dict) -> Optional[TopLevelMessage]:
+        """Parse a message from cleaned format"""
+        message_id = raw_msg.get('message_id', '')
+        text = raw_msg.get('text', '')
+        
+        if not text.strip():
+            return None
+        
+        # Parse thread replies if present
+        thread_replies = []
+        if 'thread' in raw_msg and isinstance(raw_msg['thread'], list):
+            for reply_data in raw_msg['thread']:
+                reply = self._parse_reply(reply_data)
+                if reply:
+                    thread_replies.append(reply)
+        
+        # Extract user from text (appears to be in format like <@U05L0H6795L>)
+        # or set to 'unknown' if not present
+        user = 'unknown'
+        # Could extract from mentions in text if needed
+        
+        return TopLevelMessage(
+            message_id=message_id,
+            text=text,
+            user=user,
+            timestamp=message_id,  # Using message_id as timestamp since no separate timestamp field
+            thread=thread_replies
+        )
+    
+    def _parse_reply(self, reply_data: Dict) -> Optional[Reply]:
+        """Parse a reply from cleaned format"""
+        message_id = reply_data.get('message_id', '')
+        text = reply_data.get('text', '')
+        
+        if not text.strip():
+            return None
+        
+        return Reply(
+            message_id=message_id,
+            text=text,
+            user='unknown',  # User info not in cleaned format
+            timestamp=message_id
+        )
 # ============================================
 # 3. CHUNKER: Create 3 Chunking Strategies
 # ============================================
@@ -118,13 +204,34 @@ class SyntheticQuery:
 class SlackChunker:
     """Create chunks from cleaned Slack data"""
     
-    def __init__(self, provider="anthropic"):
-        self.encoder = tiktoken.encoding_for_model(model) if provider == "anthropic" else 
+    def __init__(self, provider="anthropic", api_key=None):
+        self.provider = provider
         self.max_tokens = 4096
+        
+        if provider == "openai":
+            self.encoder = tiktoken.encoding_for_model("gpt-4o-mini")
+        else:  # anthropic
+            self.client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+            self.model = "claude-sonnet-4-5-20250929"
     
     def count_tokens(self, text: str) -> int:
         """Count tokens in text"""
-        return len(self.encoder.encode(text))
+        if self.provider == "openai":
+            return len(self.encoder.encode(text))
+        else:  # anthropic
+            try:
+                response = self.client.messages.count_tokens(
+                    model=self.model,
+                    messages=[{
+                        "role": "user",
+                        "content": text
+                    }]
+                )
+                return response.input_tokens
+            except Exception as e:
+                print(f"   ⚠️  Error counting tokens with Anthropic API: {e}")
+                # Fallback to rough estimate (1 token ≈ 4 characters for English)
+                return len(text) // 4
     
     def chunk_channel(self, channel: Channel) -> Dict[ChunkType, List[Chunk]]:
         """Apply all 3 chunking strategies"""
@@ -313,10 +420,25 @@ class SlackChunker:
     
     def _truncate_to_tokens(self, text: str, max_tokens: int) -> str:
         """Truncate text to fit within token limit"""
-        tokens = self.encoder.encode(text)
-        if len(tokens) <= max_tokens:
-            return text
-        return self.encoder.decode(tokens[:max_tokens]) + "..."
+        if self.provider == "openai":
+            tokens = self.encoder.encode(text)
+            if len(tokens) <= max_tokens:
+                return text
+            return self.encoder.decode(tokens[:max_tokens]) + "..."
+        else:  # anthropic
+            # Binary search for the right truncation point
+            if self.count_tokens(text) <= max_tokens:
+                return text
+            
+            # Start with approximate truncation
+            chars_per_token = len(text) / self.count_tokens(text)
+            estimated_chars = int(max_tokens * chars_per_token * 0.9)  # 90% to be safe
+            
+            truncated = text[:estimated_chars]
+            while self.count_tokens(truncated) > max_tokens and len(truncated) > 0:
+                truncated = truncated[:int(len(truncated) * 0.9)]
+            
+            return truncated + "..."
 
 # ============================================
 # 4. QUERY GENERATOR: Create Synthetic Queries
@@ -774,7 +896,7 @@ class QueryValidator:
 Output ONLY a JSON object with this format:
 {"valid": true/false, "reason": "explanation"}
 
-The message must actually contain enough information to answer the query."""
+Does the pair of the query and document constitute a reasonable query for the document? Does the document have meaningful content AND is the document relevant on at least some level to the query"""
 
         user_prompt = f"""Query: {query.query_text}
 
@@ -819,7 +941,7 @@ Does this message contain the answer to the query?"""
 # ============================================
 
 class SyntheticDataPipeline:
-    """Full pipeline from raw Slack dump to validated query-chunk pairs"""
+    """Full pipeline from cleaned Slack dump to validated query-chunk pairs"""
     
     def __init__(
         self, 
@@ -833,8 +955,8 @@ class SyntheticDataPipeline:
         self.output_dir = output_dir
         self.queries_per_chunk = queries_per_chunk
         
-        self.post_processor = SlackPostProcessor(archive_dir)
-        self.chunker = SlackChunker()
+        self.data_loader = SlackDataLoader(archive_dir)  # Changed from post_processor
+        self.chunker = SlackChunker(provider=provider, api_key=api_key)
         self.query_generator = QueryGenerator(api_key, provider)
         self.validator = QueryValidator(api_key, provider)
     
@@ -845,21 +967,16 @@ class SyntheticDataPipeline:
         print(f"Processing workspace: {workspace_name}")
         print(f"{'='*60}\n")
         
-        # Step 1: Post-process raw data
-        print("📝 Step 1: Post-processing raw Slack data...")
-        channels = self.post_processor.process_workspace(workspace_name)
-        print(f"   ✅ Processed {len(channels)} channels")
-        
-        # Save cleaned channels
-        cleaned_dir = f"{self.output_dir}/{workspace_name}/cleaned_channels"
-        for channel in channels:
-            self.post_processor.save_cleaned_channel(channel, cleaned_dir)
-        print(f"   ✅ Saved cleaned channels to {cleaned_dir}")
+        # Step 1: Load cleaned data
+        print("📥 Step 1: Loading cleaned Slack data...")
+        channels = self.data_loader.load_workspace(workspace_name)
+        print(f"   ✅ Loaded {len(channels)} channels")
         
         # Step 2: Create chunks
         print("\n🔪 Step 2: Creating chunks...")
         all_chunks = {}
         for channel in channels:
+            print(f"   Processing #{channel.channel_name}...")
             chunks_by_type = self.chunker.chunk_channel(channel)
             for chunk_type, chunks in chunks_by_type.items():
                 if chunk_type not in all_chunks:
@@ -938,7 +1055,7 @@ class SyntheticDataPipeline:
         print(f"\n🎉 Pipeline complete!")
         print(f"   📊 Final dataset: {len(validated_pairs)} query-chunk pairs")
         print(f"   💾 Saved to: {output_file}")
-
+        
 # ============================================
 # 7. USAGE
 # ============================================
