@@ -826,7 +826,7 @@ class QueryGenerator:
         
         return asyncio.run(self.generate_queries_for_chunk_async(chunk, num_queries, channel_name_for_context))
     
-    async def _generate_single_query_async(self, chunk: Chunk, persona_name: str, persona_config: Dict, channel_name_for_context: str) -> tuple[str, str]:
+    async def _generate_single_query_async(self, chunk: Chunk, persona_name: str, persona_config: Dict, channel_name_for_context: str, query_index: int) -> tuple[str, str]:
         """Generate a single query using LLM (async version using ai.py)"""
         
         system_message = f"""You are roleplaying as a user searching through Slack messages.
@@ -988,41 +988,62 @@ class SyntheticDataPipeline:
         
         return all_queries
     
-    def process_workspace(self, workspace_name: str):
-        """Full pipeline for one workspace"""
+    def process_workspace(self, workspace_name: str, force_rechunk: bool = False):
+        """Full pipeline for one workspace
+        
+        Args:
+            workspace_name: Name of the workspace to process
+            force_rechunk: If True, regenerate chunks even if they exist
+        """
         
         print(f"\n{'='*60}")
         print(f"Processing workspace: {workspace_name}")
         print(f"{'='*60}\n")
         
-        # Step 1: Load cleaned data
-        print("📥 Step 1: Loading cleaned Slack data...")
-        channels = self.data_loader.load_workspace(workspace_name)
-        print(f"   ✅ Loaded {len(channels)} channels")
-        
-        # Step 2: Create chunks
-        print("\n🔪 Step 2: Creating chunks...")
-        all_chunks = {}
-        for channel in channels:
-            print(f"   Processing #{channel.channel_name}...")
-            chunks_by_type = self.chunker.chunk_channel(channel)
-            for chunk_type, chunks in chunks_by_type.items():
-                if chunk_type not in all_chunks:
-                    all_chunks[chunk_type] = []
-                all_chunks[chunk_type].extend(chunks)
-        
-        for chunk_type, chunks in all_chunks.items():
-            print(f"   ✅ {chunk_type.value}: {len(chunks)} chunks")
-        
-        # Save chunks
         chunks_dir = f"{self.output_dir}/{workspace_name}/chunks"
         os.makedirs(chunks_dir, exist_ok=True)
-        for chunk_type, chunks in all_chunks.items():
-            chunk_file = f"{chunks_dir}/{chunk_type.value}.jsonl"
-            with open(chunk_file, 'w', encoding='utf-8') as f:
-                for chunk in chunks:
-                    f.write(json.dumps(chunk.to_dict()) + '\n')
-            print(f"   💾 Saved to {chunk_file}")
+        
+        # Step 2: Load or create chunks
+        print("\n🔪 Step 2: Loading or creating chunks...")
+        all_chunks = {}
+        chunks_exist = self._check_chunks_exist(chunks_dir)
+        
+        if chunks_exist and not force_rechunk:
+            print("   📦 Found existing chunks, loading them...")
+            all_chunks = self._load_existing_chunks(chunks_dir)
+            
+            for chunk_type, chunks in all_chunks.items():
+                print(f"   ✅ {chunk_type.value}: {len(chunks)} chunks (loaded from disk)")
+        else:
+            if force_rechunk:
+                print("   🔄 Force rechunk enabled, regenerating chunks...")
+            else:
+                print("   🆕 No existing chunks found, generating new chunks...")
+            
+            # Step 1: Load cleaned data (only if we need to create chunks)
+            print("\n📥 Step 1: Loading cleaned Slack data...")
+            channels = self.data_loader.load_workspace(workspace_name)
+            print(f"   ✅ Loaded {len(channels)} channels")
+            
+            # Create chunks
+            for channel in channels:
+                print(f"   Processing #{channel.channel_name}...")
+                chunks_by_type = self.chunker.chunk_channel(channel)
+                for chunk_type, chunks in chunks_by_type.items():
+                    if chunk_type not in all_chunks:
+                        all_chunks[chunk_type] = []
+                    all_chunks[chunk_type].extend(chunks)
+            
+            for chunk_type, chunks in all_chunks.items():
+                print(f"   ✅ {chunk_type.value}: {len(chunks)} chunks")
+            
+            # Save chunks
+            for chunk_type, chunks in all_chunks.items():
+                chunk_file = f"{chunks_dir}/{chunk_type.value}.jsonl"
+                with open(chunk_file, 'w', encoding='utf-8') as f:
+                    for chunk in chunks:
+                        f.write(json.dumps(chunk.to_dict()) + '\n')
+                print(f"   💾 Saved to {chunk_file}")
         
         # Step 3: Generate queries (NOW PARALLEL!)
         print("\n❓ Step 3: Generating synthetic queries...")
@@ -1087,6 +1108,45 @@ class SyntheticDataPipeline:
         print(f"\n🎉 Pipeline complete!")
         print(f"   📊 Final dataset: {len(validated_pairs)} query-chunk pairs")
         print(f"   💾 Saved to: {output_file}")
+
+    def _check_chunks_exist(self, chunks_dir: str) -> bool:
+        """Check if chunk files already exist"""
+        expected_files = [
+            f"{chunks_dir}/{ChunkType.INDIVIDUAL_MESSAGE.value}.jsonl",
+            f"{chunks_dir}/{ChunkType.THREAD.value}.jsonl",
+            f"{chunks_dir}/{ChunkType.SLIDING_WINDOW.value}.jsonl"
+        ]
+        return all(os.path.exists(f) for f in expected_files)
+
+    def _load_existing_chunks(self, chunks_dir: str) -> Dict[ChunkType, List[Chunk]]:
+        """Load chunks from existing JSONL files"""
+        all_chunks = {}
+        
+        for chunk_type in ChunkType:
+            chunk_file = f"{chunks_dir}/{chunk_type.value}.jsonl"
+            chunks = []
+            
+            try:
+                with open(chunk_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        chunk_dict = json.loads(line.strip())
+                        chunk = Chunk(
+                            chunk_id=chunk_dict['chunk_id'],
+                            chunk_type=ChunkType(chunk_dict['chunk_type']),
+                            channel_id=chunk_dict['channel_id'],
+                            channel_name=chunk_dict['channel_name'],
+                            content=chunk_dict['content'],
+                            metadata=chunk_dict['metadata'],
+                            token_count=chunk_dict['token_count']
+                        )
+                        chunks.append(chunk)
+                
+                all_chunks[chunk_type] = chunks
+            except FileNotFoundError:
+                print(f"   ⚠️  Warning: Could not find {chunk_file}")
+                all_chunks[chunk_type] = []
+        
+        return all_chunks
 
 # ============================================
 # 7. USAGE
