@@ -9,8 +9,6 @@ import openai
 import random
 from dotenv import load_dotenv
 from pathlib import Path
-from ai import ai_call, AIModel, AIMessage
-import asyncio
 
 # ============================================
 # 1. DATA MODELS
@@ -772,41 +770,30 @@ class QueryGenerator:
         assert provider in ["openai", "anthropic"], "Unsupported LLM API"
         self.provider = provider
         self.max_query_tokens = max_query_tokens
-        self.api_key = api_key
+        if provider == "anthropic": self.client = anthropic.Anthropic(api_key=api_key)
+        else: self.client = openai.OpenAI(api_key=api_key)
         
-        # Create the AIModel for use with ai.py
-        if provider == "anthropic":
-            self.ai_model = AIModel(company="anthropic", model="claude-sonnet-4-5-20250929")
-        else:
-            self.ai_model = AIModel(company="openai", model="gpt-4o-mini")
     
-    async def generate_queries_for_chunk_async(self, chunk: Chunk, num_queries: int = 3, channel_name_for_context: str = "") -> List[SyntheticQuery]:
-        """Generate multiple queries for a single chunk with different personas (async version)"""
-        
-        # Randomly select personas
-        persona_list = list(self.PERSONAS.keys())
-        selected_personas = [random.choice(persona_list) for _ in range(num_queries)]
-        
-        # Create all the async tasks
-        tasks = []
-        for i, persona_name in enumerate(selected_personas):
-            persona_config = self.PERSONAS[persona_name]
-            task = self._generate_single_query_async(
-                chunk, persona_name, persona_config, channel_name_for_context, i
-            )
-            tasks.append(task)
-        
-        # Execute all queries in parallel
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Process results
+    def generate_queries_for_chunk(
+        self, 
+        chunk: Chunk, 
+        num_queries: int = 3,
+        channel_name_for_context: str = ""
+    ) -> List[SyntheticQuery]:
+        """Generate multiple queries for a single chunk with different personas"""
         queries = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                print(f"   ⚠️  Error generating query {i}: {result}")
-                continue
+        
+        # Randomly select personas (with replacement, so same persona can be picked multiple times)
+        persona_list = list(self.PERSONAS.keys())
+        
+        for i in range(num_queries):
+            persona_name = random.choice(persona_list)
+            persona_config = self.PERSONAS[persona_name]
             
-            query_text, persona_name = result
+            query_text = self._generate_single_query(
+                chunk, persona_name, persona_config, channel_name_for_context
+            )
+            
             if query_text:
                 queries.append(SyntheticQuery(
                     query_id=f"{chunk.chunk_id}_query_{i}",
@@ -821,19 +808,48 @@ class QueryGenerator:
         
         return queries
     
-    def generate_queries_for_chunk(self, chunk: Chunk, num_queries: int = 3,channel_name_for_context: str = "") -> List[SyntheticQuery]:
-        """Synchronous wrapper for async query generation"""
+    def _send_api_call(self, persona_config, system_prompt, user_prompt):
+        try:
+            if self.provider == "anthropic":
+                response = self.client.messages.create(
+                    model="claude-sonnet-4-5-20250929",
+                    max_tokens=self.max_query_tokens,
+                    temperature=persona_config['temperature'],
+                    system=system_prompt,
+                    messages=[{
+                        "role": "user",
+                        "content": user_prompt
+                    }]
+                )
+                return response.content[0].text.strip()
+            else:  # openai
+                response = self.client.chat.completions.create(
+                    model="gpt-5-mini",
+                    max_tokens=self.max_query_tokens,
+                    temperature=persona_config['temperature'],
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ]
+                )
+                return response.choices[0].message.content.strip()
         
-        return asyncio.run(self.generate_queries_for_chunk_async(chunk, num_queries, channel_name_for_context))
-    
-    async def _generate_single_query_async(self, chunk: Chunk, persona_name: str, persona_config: Dict, channel_name_for_context: str) -> tuple[str, str]:
-        """Generate a single query using LLM (async version using ai.py)"""
+        except Exception as e:
+            print(f"Error generating query: {e}")
+            return None
+
+    def _generate_single_query(
+        self, 
+        chunk: Chunk, 
+        persona_name: str, 
+        persona_config: Dict,
+        channel_name_for_context: str
+    ) -> str:
+        """Generate a single query using LLM"""
         
-        system_message = f"""You are roleplaying as a user searching through Slack messages.
+        system_prompt = f"""You are roleplaying as a user searching through Slack messages.
         PERSONA: {persona_name}
         {persona_config['background']}
-
-        {persona_config['communication_style']}
 
         Your task is to generate a realistic search query that this user would write to find the information in the given Slack message(s).
 
@@ -845,32 +861,16 @@ class QueryGenerator:
         - DO NOT directly copy phrases from the message
         - Output ONLY the query text, nothing else
 
-        Channel context: {channel_name_for_context if channel_name_for_context else "General discussion channel"}"""
+        Channel context: {channel_name_for_context if channel_name_for_context else "General discussion channel"}
+        """
 
-        user_message = f"""Message content to create a query for:
+        user_prompt = f"""Message content to create a query for:
 
         {chunk.content}
 
         Generate a query that this {persona_name} would write to find this information:"""
-
-        messages = [
-            AIMessage(role="system", content=system_message),
-            AIMessage(role="user", content=user_message)
-        ]
-        
-        try:
-            query_text = await ai_call(
-                model=self.ai_model,
-                messages=messages,
-                max_tokens=self.max_query_tokens,
-                temperature=persona_config['temperature'],
-                response_format=str
-            )
-            return query_text.strip(), persona_name
-        except Exception as e:
-            print(f"   ⚠️  Error in _generate_single_query_async: {e}")
-            return "", persona_name
-            
+        self._send_api_call(persona_config, system_prompt, user_prompt,)
+    
 # ============================================
 # 5. VALIDATOR: Ensure Query-Chunk Relevance
 # ============================================
@@ -960,34 +960,6 @@ class SyntheticDataPipeline:
         self.query_generator = QueryGenerator(api_key, provider)
         self.validator = QueryValidator(api_key, provider)
     
-    async def _generate_queries_batch_async(
-        self, 
-        chunks: list[Chunk],
-        queries_per_chunk: int
-    ) -> list[SyntheticQuery]:
-        """Generate queries for multiple chunks in parallel"""
-        tasks = []
-        for chunk in chunks:
-            task = self.query_generator.generate_queries_for_chunk_async(
-                chunk,
-                num_queries=queries_per_chunk,
-                channel_name_for_context=f"#{chunk.channel_name}"
-            )
-            tasks.append(task)
-        
-        # Execute all chunks in parallel
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Flatten results
-        all_queries = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                print(f"   ⚠️  Error processing chunk {i}: {result}")
-                continue
-            all_queries.extend(result)
-        
-        return all_queries
-    
     def process_workspace(self, workspace_name: str):
         """Full pipeline for one workspace"""
         
@@ -1024,33 +996,29 @@ class SyntheticDataPipeline:
                     f.write(json.dumps(chunk.to_dict()) + '\n')
             print(f"   💾 Saved to {chunk_file}")
         
-        # Step 3: Generate queries (NOW PARALLEL!)
+        # Step 3: Generate queries
         print("\n❓ Step 3: Generating synthetic queries...")
+        all_queries = []
         
-        # Sample chunks for query generation
+        # Sample chunks for query generation (you might want to do all)
         sample_chunks = []
         for chunk_type, chunks in all_chunks.items():
             sample_chunks.extend(chunks[:100])  # Sample 100 from each type
         
-        # Process in batches to avoid overwhelming the system
-        batch_size = 50  # Process 50 chunks at a time
-        all_queries = []
-        
-        for i in range(0, len(sample_chunks), batch_size):
-            batch = sample_chunks[i:i + batch_size]
-            print(f"   Processing batch {i//batch_size + 1}/{(len(sample_chunks) + batch_size - 1)//batch_size} ({len(batch)} chunks)...")
+        for i, chunk in enumerate(sample_chunks, 1):
+            if i % 10 == 0:
+                print(f"   Progress: {i}/{len(sample_chunks)} chunks")
             
-            # Generate queries for this batch in parallel
-            batch_queries = asyncio.run(
-                self._generate_queries_batch_async(batch, self.queries_per_chunk)
+            queries = self.query_generator.generate_queries_for_chunk(
+                chunk, 
+                num_queries=self.queries_per_chunk,
+                channel_name_for_context=f"#{chunk.channel_name}"
             )
-            all_queries.extend(batch_queries)
-            
-            print(f"   Progress: {min(i + batch_size, len(sample_chunks))}/{len(sample_chunks)} chunks processed")
+            all_queries.extend(queries)
         
         print(f"   ✅ Generated {len(all_queries)} queries")
         
-        # Step 4: Validate queries (you might want to parallelize this too)
+        # Step 4: Validate queries
         print("\n✔️  Step 4: Validating query-chunk pairs...")
         validated_pairs = []
         
@@ -1087,7 +1055,7 @@ class SyntheticDataPipeline:
         print(f"\n🎉 Pipeline complete!")
         print(f"   📊 Final dataset: {len(validated_pairs)} query-chunk pairs")
         print(f"   💾 Saved to: {output_file}")
-
+        
 # ============================================
 # 7. USAGE
 # ============================================
