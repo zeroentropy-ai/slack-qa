@@ -924,7 +924,7 @@ Does this message contain the answer to the query?"""
             result = await ai_call(
                 model=self.ai_model,
                 messages=messages,
-                max_tokens=150,
+                max_tokens=350,
                 temperature=0,
                 response_format=ValidationResult
             )
@@ -1098,7 +1098,7 @@ class SyntheticDataPipeline:
         # Sample chunks for query generation
         sample_chunks = []
         for chunk_type, chunks in all_chunks.items():
-            sample_chunks.extend(chunks[:100])  # Sample 100 from each type
+            sample_chunks.extend(chunks)  # Sample 100 from each type
         
         # Process in batches to avoid overwhelming the system
         batch_size = 50  # Process 50 chunks at a time
