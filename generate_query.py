@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from pathlib import Path
 from ai import ai_call, AIModel, AIMessage
 import asyncio
-
+from pydantic import BaseModel, ValidationError, computed_field
 # ============================================
 # 1. DATA MODELS
 # ============================================
@@ -1222,4 +1222,13 @@ if __name__ == "__main__":
         queries_per_chunk=3
     )
     
-    pipeline.process_workspace("Flutter_Community_TGT6YF2J1")
+    #pipeline.process_workspace("Creative_Huddle_T016YKS2ED8")
+    #pipeline.process_workspace("Flutter_Community_TGT6YF2J1")
+    #pipeline.process_workspace("Framerverse_T057TE4AN06")
+    #pipeline.process_workspace("larachat_T03860VUN")
+    #pipeline.process_workspace("Love_For_Games_T7JF39J0M")
+    pipeline.process_workspace("Modal_Community_T031JJZ7Q6T")
+    #pipeline.process_workspace("ParadeDB_Community_T05M3SS6URL")
+    #pipeline.process_workspace("Product_School_T0A93EN1Y")
+    #pipeline.process_workspace("Support_Driven_T02DT7R20")
+    #pipeline.process_workspace("Tech_Reach_Pro_T07A3E96BU6")
