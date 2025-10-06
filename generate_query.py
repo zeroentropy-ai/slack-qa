@@ -945,6 +945,10 @@ Does this message contain the answer to the query?"""
 # 6. PIPELINE: Orchestrate Everything
 # ============================================
 
+# ============================================
+# 6. PIPELINE: Orchestrate Everything
+# ============================================
+
 class SyntheticDataPipeline:
     """Full pipeline from cleaned Slack dump to validated query-chunk pairs"""
     
@@ -964,6 +968,21 @@ class SyntheticDataPipeline:
         self.chunker = SlackChunker(provider=provider, api_key=api_key)
         self.query_generator = QueryGenerator(api_key, provider)
         self.validator = QueryValidator(api_key, provider)
+    
+    def _load_processed_chunk_ids(self, output_file: str) -> set[str]:
+        """Load chunk IDs that have already been processed"""
+        processed_chunk_ids = set()
+        
+        if os.path.exists(output_file):
+            with open(output_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    try:
+                        pair = json.loads(line.strip())
+                        processed_chunk_ids.add(pair['chunk_id'])
+                    except json.JSONDecodeError:
+                        continue
+        
+        return processed_chunk_ids
     
     async def _generate_queries_batch_async(
         self, 
@@ -1035,6 +1054,14 @@ class SyntheticDataPipeline:
         
         return validated_pairs
     
+    def _save_validated_pairs_batch(self, validated_pairs: list[dict[str, Any]], output_file: str):
+        """Append validated pairs to output file"""
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        
+        with open(output_file, 'a', encoding='utf-8') as f:
+            for pair in validated_pairs:
+                f.write(json.dumps(pair) + '\n')
+    
     def process_workspace(self, workspace_name: str, force_rechunk: bool = False):
         """Full pipeline for one workspace
         
@@ -1049,6 +1076,13 @@ class SyntheticDataPipeline:
         
         chunks_dir = f"{self.output_dir}/{workspace_name}/chunks"
         os.makedirs(chunks_dir, exist_ok=True)
+        
+        output_file = f"{self.output_dir}/{workspace_name}/validated_query_chunk_pairs.jsonl"
+        
+        # Load already processed chunk IDs
+        processed_chunk_ids = self._load_processed_chunk_ids(output_file)
+        if processed_chunk_ids:
+            print(f"\n📋 Found {len(processed_chunk_ids)} already processed chunks (will skip)")
         
         # Step 2: Load or create chunks
         print("\n🔪 Step 2: Loading or creating chunks...")
@@ -1095,64 +1129,75 @@ class SyntheticDataPipeline:
         # Step 3: Generate queries (PARALLEL!)
         print("\n❓ Step 3: Generating synthetic queries...")
         
-        # Sample chunks for query generation
+        # Sample chunks for query generation - EXCLUDE already processed chunks
         sample_chunks = []
         for chunk_type, chunks in all_chunks.items():
-            sample_chunks.extend(chunks)  # Sample 100 from each type
+            for chunk in chunks:
+                if chunk.chunk_id not in processed_chunk_ids:
+                    sample_chunks.append(chunk)
+        
+        if not sample_chunks:
+            print(f"   ✅ All chunks already processed! ({len(processed_chunk_ids)} total)")
+            print(f"\n🎉 Pipeline complete!")
+            print(f"   📊 Final dataset: {len(processed_chunk_ids)} query-chunk pairs")
+            print(f"   💾 Saved to: {output_file}")
+            return
+        
+        print(f"   📝 Processing {len(sample_chunks)} unprocessed chunks (skipping {len(processed_chunk_ids)} already done)")
         
         # Process in batches to avoid overwhelming the system
         batch_size = 50  # Process 50 chunks at a time
-        all_queries = []
+        total_new_pairs = 0
         
         for i in range(0, len(sample_chunks), batch_size):
             batch = sample_chunks[i:i + batch_size]
-            print(f"   Processing batch {i//batch_size + 1}/{(len(sample_chunks) + batch_size - 1)//batch_size} ({len(batch)} chunks)...")
+            batch_num = i//batch_size + 1
+            total_batches = (len(sample_chunks) + batch_size - 1)//batch_size
+            
+            print(f"\n   📦 Processing batch {batch_num}/{total_batches} ({len(batch)} chunks)...")
             
             # Generate queries for this batch in parallel
+            print(f"      Generating queries...")
             batch_queries = asyncio.run(
                 self._generate_queries_batch_async(batch, self.queries_per_chunk)
             )
-            all_queries.extend(batch_queries)
+            print(f"      ✅ Generated {len(batch_queries)} queries")
+            
+            # Step 4: Validate queries for this batch
+            print(f"      Validating queries...")
+            
+            # Create chunk lookup for this batch
+            chunk_lookup = {chunk.chunk_id: chunk for chunk in batch}
+            
+            # Validate in smaller sub-batches to avoid overwhelming the system
+            validation_batch_size = 100
+            batch_validated_pairs = []
+            
+            for j in range(0, len(batch_queries), validation_batch_size):
+                validation_batch = batch_queries[j:j + validation_batch_size]
+                
+                # Validate this sub-batch in parallel
+                sub_batch_validated = asyncio.run(
+                    self._validate_queries_batch_async(validation_batch, chunk_lookup)
+                )
+                batch_validated_pairs.extend(sub_batch_validated)
+            
+            print(f"      ✅ {len(batch_validated_pairs)}/{len(batch_queries)} queries validated")
+            
+            # Save this batch immediately
+            if batch_validated_pairs:
+                self._save_validated_pairs_batch(batch_validated_pairs, output_file)
+                total_new_pairs += len(batch_validated_pairs)
+                print(f"      💾 Saved {len(batch_validated_pairs)} pairs to {output_file}")
             
             print(f"   Progress: {min(i + batch_size, len(sample_chunks))}/{len(sample_chunks)} chunks processed")
         
-        print(f"   ✅ Generated {len(all_queries)} queries")
-        
-        # Step 4: Validate queries (NOW PARALLEL TOO!)
-        print("\n✔️  Step 4: Validating query-chunk pairs...")
-        
-        # Create chunk lookup
-        chunk_lookup = {}
-        for chunk_type, chunks in all_chunks.items():
-            for chunk in chunks:
-                chunk_lookup[chunk.chunk_id] = chunk
-        
-        # Validate in batches to avoid overwhelming the system
-        validation_batch_size = 100  # Process 100 queries at a time
-        validated_pairs = []
-        
-        for i in range(0, len(all_queries), validation_batch_size):
-            batch = all_queries[i:i + validation_batch_size]
-            print(f"   Processing validation batch {i//validation_batch_size + 1}/{(len(all_queries) + validation_batch_size - 1)//validation_batch_size} ({len(batch)} queries)...")
-            
-            # Validate this batch in parallel
-            batch_validated = asyncio.run(
-                self._validate_queries_batch_async(batch, chunk_lookup)
-            )
-            validated_pairs.extend(batch_validated)
-            
-            print(f"   Progress: {min(i + validation_batch_size, len(all_queries))}/{len(all_queries)} queries processed")
-        
-        print(f"   ✅ {len(validated_pairs)}/{len(all_queries)} queries validated")
-        
-        # Save validated pairs
-        output_file = f"{self.output_dir}/{workspace_name}/validated_query_chunk_pairs.jsonl"
-        with open(output_file, 'w', encoding='utf-8') as f:
-            for pair in validated_pairs:
-                f.write(json.dumps(pair) + '\n')
+        # Calculate final statistics
+        final_processed_chunk_ids = self._load_processed_chunk_ids(output_file)
         
         print(f"\n🎉 Pipeline complete!")
-        print(f"   📊 Final dataset: {len(validated_pairs)} query-chunk pairs")
+        print(f"   📊 Added {total_new_pairs} new query-chunk pairs in this run")
+        print(f"   📊 Total dataset: {len(final_processed_chunk_ids)} query-chunk pairs")
         print(f"   💾 Saved to: {output_file}")
 
     def _check_chunks_exist(self, chunks_dir: str) -> bool:
@@ -1227,7 +1272,7 @@ if __name__ == "__main__":
     #pipeline.process_workspace("Framerverse_T057TE4AN06")
     #pipeline.process_workspace("larachat_T03860VUN")
     #pipeline.process_workspace("Love_For_Games_T7JF39J0M")
-    #pipeline.process_workspace("Modal_Community_T031JJZ7Q6T")
+    pipeline.process_workspace("Modal_Community_T031JJZ7Q6T")
     #pipeline.process_workspace("ParadeDB_Community_T05M3SS6URL")
     #pipeline.process_workspace("Product_School_T0A93EN1Y")
     #pipeline.process_workspace("Support_Driven_T02DT7R20")
