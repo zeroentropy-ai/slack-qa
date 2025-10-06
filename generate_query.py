@@ -924,7 +924,7 @@ Does this message contain the answer to the query?"""
             result = await ai_call(
                 model=self.ai_model,
                 messages=messages,
-                max_tokens=350,
+                max_tokens=1000, #some were getting cut off at 350; just make it 1k
                 temperature=0,
                 response_format=ValidationResult
             )
@@ -1227,7 +1227,7 @@ if __name__ == "__main__":
     #pipeline.process_workspace("Framerverse_T057TE4AN06")
     #pipeline.process_workspace("larachat_T03860VUN")
     #pipeline.process_workspace("Love_For_Games_T7JF39J0M")
-    pipeline.process_workspace("Modal_Community_T031JJZ7Q6T")
+    #pipeline.process_workspace("Modal_Community_T031JJZ7Q6T")
     #pipeline.process_workspace("ParadeDB_Community_T05M3SS6URL")
     #pipeline.process_workspace("Product_School_T0A93EN1Y")
     #pipeline.process_workspace("Support_Driven_T02DT7R20")
