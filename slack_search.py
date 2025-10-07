@@ -139,7 +139,7 @@ class SlackSearch:
         
         headers = {
             "Accept": "*/*",
-            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Encoding": "",
             "Accept-Language": "en-US,en;q=0.9",
             "Cookie": self.cookies,
             "Content-Type": multipart_data.content_type,
@@ -167,7 +167,14 @@ class SlackSearch:
             params=query_params,
             data=multipart_data
         )
-        
+
+        print(f"Status Code: {response.status_code}")
+        print(f"Headers: {response.headers}")
+        print(f"Body: {response.text[:500]}")  # First 500 chars
+        print(f"Content-Type: {response.headers.get('Content-Type')}")
+        print(f"Body length: {len(response.text)}")
+        print(f"Body (raw): {repr(response.text[:1000])}")
+
         data = response.json()
         
         if not data.get('ok'):
@@ -383,26 +390,26 @@ def search_all(
 
 
 # Example usage
-if __name__ == "__main__":
-    # Browser mode example
-    XOXC_TOKEN = "xoxc-..."
-    FULL_COOKIES = "utm=%7B%7D; x=..."
-    WORKSPACE_URL = "https://yourworkspace.slack.com"
+# if __name__ == "__main__":
+#     # Browser mode example
+#     XOXC_TOKEN = "xoxc-..."
+#     FULL_COOKIES = "utm=%7B%7D; x=..."
+#     WORKSPACE_URL = "https://yourworkspace.slack.com"
     
-    search = SlackSearch(
-        token=XOXC_TOKEN,
-        auth_mode='browser',
-        cookies=FULL_COOKIES,
-        workspace_url=WORKSPACE_URL
-    )
+#     search = SlackSearch(
+#         token=XOXC_TOKEN,
+#         auth_mode='browser',
+#         cookies=FULL_COOKIES,
+#         workspace_url=WORKSPACE_URL
+#     )
     
-    # Search for messages
-    results = search.search("machine learning", search_type="messages")
-    print(f"Found {results.total} results")
-    for msg in results.matches[:5]:
-        print(f"- {msg.get('text', '')[:100]}")
+#     # Search for messages
+#     results = search.search("machine learning", search_type="messages")
+#     print(f"Found {results.total} results")
+#     for msg in results.matches[:5]:
+#         print(f"- {msg.get('text', '')[:100]}")
     
-    # Paginate through all results
-    print("\nAll results:")
-    for i, msg in enumerate(search.search_all_pages("error", search_type="messages", max_results=10)):
-        print(f"{i+1}. {msg.get('text', '')[:80]}")
+#     # Paginate through all results
+#     print("\nAll results:")
+#     for i, msg in enumerate(search.search_all_pages("error", search_type="messages", max_results=10)):
+#         print(f"{i+1}. {msg.get('text', '')[:80]}")
