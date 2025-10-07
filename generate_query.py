@@ -1098,6 +1098,7 @@ class SyntheticDataPipeline:
         else:
             if force_rechunk:
                 print("   🔄 Force rechunk enabled, regenerating chunks...")
+                all_chunks = []
             else:
                 print("   🆕 No existing chunks found, generating new chunks...")
             
