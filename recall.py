@@ -1,6 +1,6 @@
 import json
 
-K = 20
+K = 100
 
 qrels_by_query_id = {}
 with open("./synthetic_data/Modal_Community_T031JJZ7Q6T/beir_format_individual_message/qrels.jsonl") as f:
@@ -13,7 +13,7 @@ with open("./synthetic_data/Modal_Community_T031JJZ7Q6T/beir_format_individual_m
         qrels_by_query_id[qrel["query_id"]].append(qrel)
 
 results = []
-with open("results_zerank_1.jsonl") as f:
+with open("slack_results.jsonl") as f:
     for line in f:
         if "{" not in line:
             continue

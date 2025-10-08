@@ -5,8 +5,10 @@ from tqdm.asyncio import tqdm
 from ai import AIRerankModel, ai_rerank
 
 rerank_model = AIRerankModel(
-    company="cohere",
-    model="rerank-v3.5",
+    # company="cohere",
+    # model="rerank-v3.5",
+    company="zeroentropy",
+    model="zerank-1",
 )
 
 # Get docs and queries
@@ -26,7 +28,7 @@ with open("./synthetic_data/Modal_Community_T031JJZ7Q6T/beir_format_individual_m
         queries[query["id"]] = query
 
 results = []
-with open("results.jsonl") as f:
+with open("slack_results.jsonl") as f:
     for line in f:
         if "{" not in line:
             continue
@@ -71,7 +73,7 @@ async def main():
         rerank_result(result)
         for result in results
     ])
-    with open(f"results_{rerank_model.model.replace('-', '_')}.jsonl", "w") as f:
+    with open(f"slack_results_{rerank_model.model.replace('-', '_')}.jsonl", "w") as f:
         for result in reranked_results:
             f.write(json.dumps(result) + "\n")
 
