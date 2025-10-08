@@ -1,6 +1,6 @@
 import json
 
-K = 100
+K = None
 
 qrels_by_query_id = {}
 with open("./synthetic_data/Modal_Community_T031JJZ7Q6T/beir_format_individual_message/qrels.jsonl") as f:

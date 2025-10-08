@@ -27,6 +27,7 @@ def process_message(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
   
     processed = {
         "message_id": message_id,
+        "timestamp": ts,
         "text": text
     }
     

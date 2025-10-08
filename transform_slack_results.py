@@ -2,7 +2,7 @@ import json
 import uuid
 from collections import defaultdict
 
-def generate_deterministic_uuid(text: str, timestamp: float) -> str:
+def generate_deterministic_uuid(text: str, timestamp: float | None) -> str:
     """Generate a deterministic UUID from text and timestamp."""
     combined = f"{text}:{timestamp}"
     namespace = uuid.NAMESPACE_DNS # arbitrary namespace
@@ -20,6 +20,9 @@ def rrf(all_rankings: list[list[str]]) -> list[str]:
         for doc_id, score in doc_id_and_scores
     ]
 
+with open("timestamp_to_message_id.json") as f:
+    timestamp_to_message_id = json.loads(f.read())
+
 message_id_to_document_id = {}
 with open("./synthetic_data/Modal_Community_T031JJZ7Q6T/beir_format_individual_message/documents.jsonl") as f:
     for line in f:
@@ -36,14 +39,20 @@ with open("slack_raw_results.jsonl") as f, open("slack_results.jsonl", "w") as f
         for result in j["slack_results"]:
             ranking = []
             for match in result["matches"]:
-                document_id = generate_deterministic_uuid(match["text"], float(match["ts"]))
-                ranking.append(document_id)
+                message_id = timestamp_to_message_id.get(match["ts"], "")
+                # message_id = generate_deterministic_uuid(match["text"], float(match["ts"]))
+                # print(" --- start --- ")
+                # print(f"Old: {message_id}")
+                # print(f"New: {message_id_one}")
+                ranking.append(message_id)
             all_rankings.append(ranking)
         message_ids = rrf(all_rankings)
         document_ids_nested = [
             list(message_id_to_document_id.get(mid, set()))
             for mid in message_ids
         ]
+        hitrate = len([d for d in document_ids_nested if len(d) > 0]) / len(message_ids)
+        print(f"Hitrate: {hitrate}")
         document_ids = [
             document_id
             for some_document_ids in document_ids_nested

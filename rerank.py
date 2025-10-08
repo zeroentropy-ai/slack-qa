@@ -73,7 +73,7 @@ async def main():
         rerank_result(result)
         for result in results
     ])
-    with open(f"slack_results_{rerank_model.model.replace('-', '_')}.jsonl", "w") as f:
+    with open(f"slack_results_{rerank_model.company}.jsonl", "w") as f:
         for result in reranked_results:
             f.write(json.dumps(result) + "\n")
 
