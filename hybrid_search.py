@@ -11,7 +11,7 @@ import asyncio
 
 # Import embedding functions
 # from embed_qwen import embed_qwen
-from embed_openai import embed_openai
+from openai_tools import embed_openai
 
 
 @dataclass
@@ -212,7 +212,6 @@ class TurbopufferHybridSearcher:
             List of dictionaries with 'text', 'url', 'chunk_idx', 'similarity' keys
         """
 
-        print(f"searching {tenant_name} for '{query}' (top_k={top_k})")
         results = await self.search(tenant_name, query, top_k)
         
         # Convert to ChunkSearcher format
