@@ -11,7 +11,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, TextIO, cast
 from uuid import uuid4
-from evals.ai_vllm import rerank_vllm
 import anthropic
 import cohere
 import cohere.core
@@ -30,7 +29,6 @@ from anthropic import NOT_GIVEN, Anthropic, AsyncAnthropic, NotGiven
 from anthropic.types import MessageParam
 from dotenv import load_dotenv
 from loguru import logger
-from mxbai_rerank import MxbaiRerankV2  # pyright: ignore[reportMissingTypeStubs]
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
 from openlimit.rate_limiters import (  # pyright: ignore[reportMissingTypeStubs]
@@ -40,12 +38,11 @@ from openlimit.redis_rate_limiters import (  # pyright: ignore[reportMissingType
     RateLimiterWithRedis,
 )
 from pydantic import BaseModel, ValidationError, computed_field
-from sentence_transformers import CrossEncoder, SentenceTransformer
 from transformers import AutoTokenizer
 from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 from zeroentropy import AsyncZeroEntropy
 
-from evals.utils import ROOT
+ROOT = f"{Path(__file__).resolve().parent}"
 
 load_dotenv(override=True)
 
@@ -331,9 +328,6 @@ class AIConnection:
     together_client: AsyncOpenAI
     together_rerank_client: cohere.AsyncClient | None
     jina_client: httpx.AsyncClient
-    huggingface_client: tuple[
-        dict[str, SentenceTransformer], dict[str, CrossEncoder | MxbaiRerankV2]
-    ]
     baseten_client: httpx.AsyncClient
     baseten_semaphore: asyncio.Semaphore
     modal_client: httpx.AsyncClient
@@ -1432,35 +1426,7 @@ async def ai_rerank(
         case "huggingface":
             model_name = model.model
             hf_cross_encoders = get_ai_connection().huggingface_client[1]
-
-            # Initialize the model if it hasn't been already
-            if model_name not in hf_cross_encoders:
-                if model_name.startswith("mixedbread-ai/"):
-                    hf_cross_encoders[model_name] = MxbaiRerankV2(
-                        model_name,
-                        device=DEVICE,
-                    )
-                else:  # This should work for Qwen/Qwen3-Reranker-4B etc.
-                    hf_cross_encoders[model_name] = CrossEncoder(
-                        model_name,
-                        device=DEVICE,
-                    )
-
-            # Inference the model
-            hf_cross_encoder = hf_cross_encoders[model_name]
-            match hf_cross_encoder:
-                case CrossEncoder():
-                    scores = hf_cross_encoder.predict(  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-                        [(query, document) for document in unprocessed_texts]
-                    )
-                    relevance_scores = [float(score) for score in scores]
-                case MxbaiRerankV2():
-                    results = hf_cross_encoder.rank(  # pyright: ignore[reportUnknownMemberType]
-                        query=query,
-                        documents=unprocessed_texts,
-                    )
-                    results.sort(key=lambda x: x.index)
-                    relevance_scores = [result.score for result in results]
+            raise ValueError("no hf")
         case "modal":
             for i in range(num_ratelimit_retries):
                 try:
@@ -1500,8 +1466,7 @@ async def ai_rerank(
             if relevance_scores is None:
                 raise AITimeoutError("Cannot overcome Modal RateLimitError")
         case "fastapi":
-            from evals.ai_fastapi import rerank_fastapi
-            relevance_scores = await rerank_fastapi(query, unprocessed_texts)
+            raise ValueError("No FastAPI")
         case "baseten":
             for i in range(num_ratelimit_retries):
                 try:
