@@ -168,12 +168,12 @@ class SlackSearch:
             data=multipart_data
         )
 
-        print(f"Status Code: {response.status_code}")
-        print(f"Headers: {response.headers}")
-        print(f"Body: {response.text[:500]}")  # First 500 chars
-        print(f"Content-Type: {response.headers.get('Content-Type')}")
-        print(f"Body length: {len(response.text)}")
-        print(f"Body (raw): {repr(response.text[:1000])}")
+        # print(f"Status Code: {response.status_code}")
+        # print(f"Headers: {response.headers}")
+        # print(f"Body: {response.text[:500]}")  # First 500 chars
+        # print(f"Content-Type: {response.headers.get('Content-Type')}")
+        # print(f"Body length: {len(response.text)}")
+        # print(f"Body (raw): {repr(response.text[:1000])}")
 
         data = response.json()
         

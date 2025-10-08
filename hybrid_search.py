@@ -58,9 +58,7 @@ class TurbopufferHybridSearcher:
     
     async def _generate_query_embedding(self, query: str) -> List[float]:
         """Generate query embedding based on provider."""
-        if self.provider == 'qwen':
-            embedding = await embed_qwen(query, "query")
-        elif self.provider == 'openai':
+        if self.provider == 'openai':
             embedding = await embed_openai(query)
         else:
             raise ValueError(f"Unknown provider: {self.provider}")
