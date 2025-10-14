@@ -2,6 +2,7 @@ import asyncio
 import json
 import sys
 import time
+import os
 from collections import defaultdict
 from dataclasses import asdict
 from typing import List, Dict, Any
@@ -111,6 +112,23 @@ class RateLimiter:
             await asyncio.sleep(wait_time)
 
         self.last_request_time = time.time()
+
+
+def safe_save_json(data: Dict, filename: str):
+    """Safely save JSON data to file using atomic write"""
+    temp_filename = f"{filename}.tmp"
+    try:
+        # Write to temporary file
+        with open(temp_filename, "w") as f:
+            json.dump(data, f, indent=2)
+        
+        # Atomically rename temp file to target file
+        os.replace(temp_filename, filename)
+    except Exception as e:
+        # Clean up temp file if something went wrong
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
+        raise e
 
 
 def load_data():
@@ -543,6 +561,8 @@ async def main():
     
     # Process queries
     completed_in_session = 0
+    session_success_count = 0
+    session_recall_20_count = 0
 
     for i, query_id in enumerate(selected_query_ids):
         query = queries[query_id]
@@ -574,9 +594,19 @@ async def main():
         traces_dict[query_id] = trace
         completed_in_session += 1
         
-        # Save traces after each completion
-        with open("automated_agent_traces.json", "w") as f:
-            json.dump(traces_dict, f, indent=2)
+        # Update running statistics
+        if trace.get("found", False):
+            session_success_count += 1
+        if trace.get("best_recall_at_20", 0) == 1:
+            session_recall_20_count += 1
+        
+        # Print running statistics
+        success_rate = (session_success_count / completed_in_session) * 100
+        recall_20_rate = (session_recall_20_count / completed_in_session) * 100
+        print(f"\n📊 Running stats: Success rate (rank 1): {session_success_count}/{completed_in_session} ({success_rate:.1f}%), Recall@20: {session_recall_20_count}/{completed_in_session} ({recall_20_rate:.1f}%)")
+        
+        # Save traces after each completion (atomic write)
+        safe_save_json(traces_dict, "automated_agent_traces.json")
 
     # Summary
     print(f"\n\n{'='*80}")
