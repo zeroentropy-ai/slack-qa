@@ -166,16 +166,29 @@ def rrf(all_rankings: List[List[str]], k: int = 60) -> List[str]:
     return [doc_id for doc_id, score in doc_id_and_scores]
 
 
-async def execute_searches(rate_limiter: RateLimiter, client_pool: SearchClientPool, search_terms: List[str]) -> List[Dict]:
-    """Execute multiple searches using round-robin client selection"""
+async def execute_searches(rate_limiter: RateLimiter, client_pool: SearchClientPool, search_terms: List[str], cache: Dict[str, Dict] = None) -> List[Dict]:
+    """Execute multiple searches using round-robin client selection with caching"""
+    if cache is None:
+        cache = {}
+    
     results = []
     for i, term in enumerate(search_terms):
+        # Check cache first
+        if term in cache:
+            print(f"  💾 Cache hit for '{term}'")
+            results.append(cache[term])
+            continue
+        
         try:
             await rate_limiter.wait_if_needed()
             # Get next client in round-robin fashion
             search_client = client_pool.get_next_client()
             result = await search_client.search_async(term, search_type="messages", count=100)
-            results.append(asdict(result))
+            result_dict = asdict(result)
+            
+            # Store in cache
+            cache[term] = result_dict
+            results.append(result_dict)
         except Exception as e:
             print(f"  ⚠️  Error searching '{term}': {e}")
             results.append({"matches": [], "total": 0})
@@ -323,7 +336,8 @@ async def automated_agent_loop(
     documents: Dict[str, Dict],
     openai_client: openai.AsyncOpenAI,
     rate_limiter: RateLimiter,
-    rerank_model: AIRerankModel
+    rerank_model: AIRerankModel,
+    search_cache: Dict[str, Dict]
 ) -> Dict[str, Any]:
     """Run the automated agent loop for a single query"""
     MAX_STEPS = 10
@@ -390,7 +404,7 @@ async def automated_agent_loop(
         print(f"  🔍 Searching for: {search_queries}")
 
         # Execute searches
-        slack_results = await execute_searches(rate_limiter, client_pool, search_queries)
+        slack_results = await execute_searches(rate_limiter, client_pool, search_queries, search_cache)
 
         # Transform results
         document_ids, individual_query_ranks, individual_query_results = transform_results(
@@ -490,6 +504,10 @@ async def main():
         {
             "token": "xoxc-3052645262231-9641512460897-9626513329798-19e797687a5e0bb7539701cd740f4a9b3c98f040ebd6213e7f33577468f85c6d",
             "cookies": 'utm=%7B%7D; d=xoxd-9jnd5xe9oeEUyLp%2BRKca5gj8q52vJn6HmzamGg6lmEe6lt2qvUO9qlhpnpwxYOL%2BNXsgi02JupH%2F0rv2ZSWMFhXcpokUbyyruy3%2FzQuAZGcU5naZQmwOyzshjHIp9%2B7hHId567haJOfjL63ak6Gln7ui6sZG413neXIOiz%2FPs6J5OI9aMJanpXQDW7szEUQ0TdcU8ZBcUrdcoYyI0rFMuD65; x=f3db5096c114fdcea90c10e9316228dc.1760473163; shown_ssb_redirect_page=1; OptanonConsent=isGpcEnabled=0&datestamp=Sun+Oct+12+2025+12%3A14%3A38+GMT-0700+(Pacific+Daylight+Time)&version=202402.1.0&browserGpcFlag=0&isIABGlobal=false&hosts=&consentId=1ff3be3e-e588-4932-9ac3-2630dd7c33aa&interactionCount=1&isAnonUser=1&landingPath=NotLandingPage&groups=1%3A1%2C3%3A1%2C2%3A1%2C4%3A1&AwaitingReconsent=false; _ga=GA1.1.221978663.1757447861; _ga_QTJQME5M5D=GS2.1.s1760296466$o9$g0$t1760296466$j60$l0$h0; _cs_cvars=%7B%7D; _cs_id=65bbed2f-e942-a0d8-ff58-7364edf3ae6f.1757447860.14.1760296466.1760296466.1.1791611860287.1.x; _lc2_fpi_js=e00b11ac9c9b--01k4r0wbxafwq3ab8a66d6tj9e; _li_dcdm_c=.slack.com; _li_ss=ClkKBgj5ARD1GwoFCAoQ9RsKBgikARD5GwoGCN0BEPUbCgYI4QEQ9RsKBgiBARD1GwoGCKIBEPUbCgkI_____wcQ-RsKBQh-EPUbCgYIiQEQ-RsKBgilARD5Gw; cjConsent=MHxOfDB8Tnww; cjUser=7ca4c4b8-116d-45aa-ad4c-88a5d183fc3d; PageCount=1; ssb_instance_id=b9822ad1-6df9-40d2-8374-d0b286d41559; d-s=1760296437; no_download_ssb_banner=1; show_download_ssb_banner=1; shown_download_ssb_modal=1; _fbp=fb.1.1759438148806.71444673446120306; lc=1759536553; optimizelySession=0; _gcl_au=1.1.536689637.1757447861.707819349.1759440091.1759440092; _cs_c=0; _lc2_fpi=e00b11ac9c9b--01k4r0wbxafwq3ab8a66d6tj9e; tz=-420; b=.f3db5096c114fdcea90c10e9316228dc'
+        },
+        {
+            "token": "xoxc-3052645262231-9697857150834-9691497212867-37f1525a905e8505827d929693c18f405ddd3fd12167cbcda985ad33ad8f9dc3",
+            "cookies": 'utm=%7B%7D; b=.a5bc76f488ac86ccc37120cf98c842d6; x=a5bc76f488ac86ccc37120cf98c842d6.1760476907; OptanonConsent=isGpcEnabled=0&datestamp=Tue+Oct+14+2025+14%3A29%3A22+GMT-0700+(Pacific+Daylight+Time)&version=202402.1.0&browserGpcFlag=0&isIABGlobal=false&hosts=&consentId=5304d73c-f71d-4e85-a496-29147eab897a&interactionCount=1&isAnonUser=1&landingPath=NotLandingPage&groups=1%3A1%2C3%3A1%2C2%3A1%2C4%3A1&AwaitingReconsent=false; d=xoxd-%2BYOrnqBVqe8psoS5%2BHYoJaX%2F8RbXjLnNNqxp98d9B0TubF90rrxMMASHnUnAdjl2NUz%2BAkH%2BPlXnm%2BXsPMpVPmsUHTWkTC8MEzlxRc5gJ0igjdF%2BFr3oPLzvDG2esxuYev5aBL85ZuzxrcnECKSAM%2BNlW92V0zagayns6wLWjrGu3b18ZL0dqv71C60MOTIL0xXp3Jk%3D; lc=1760477361; d-s=1760477361; shown_ssb_redirect_page=1; shown_download_ssb_modal=1; show_download_ssb_banner=1; no_download_ssb_banner=1; tz=-420'
         }
     ]
     
@@ -520,6 +538,9 @@ async def main():
     except FileNotFoundError:
         print("No existing traces found, starting fresh")
     
+    # Create search cache
+    search_cache = {}
+    
     # Process queries
     completed_in_session = 0
 
@@ -546,7 +567,7 @@ async def main():
         trace = await automated_agent_loop(
             query, qrel_doc_ids, target_content, client_pool,
             timestamp_to_message_id, message_id_to_document_id, documents,
-            openai_client, rate_limiter, RERANK_MODEL
+            openai_client, rate_limiter, RERANK_MODEL, search_cache
         )
 
         # Update traces dict
@@ -592,6 +613,11 @@ async def main():
         print(f"  Recall@20: {recall_20_count_all}/{len(all_traces)} ({100*recall_20_count_all/len(all_traces):.1f}%)")
     
     print(f"\nTraces saved to: automated_agent_traces.json")
+    
+    # Print cache statistics
+    if search_cache:
+        cache_size = len(search_cache)
+        print(f"\nSearch cache: {cache_size} unique queries cached")
 
 
 if __name__ == "__main__":
