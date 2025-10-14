@@ -60,11 +60,44 @@ Search attempts so far: {current_step}/10
 """
 
 
+class SearchClientPool:
+    """Manages multiple SlackSearch clients with round-robin token rotation"""
+    def __init__(self, tokens_and_cookies: List[Dict[str, str]]):
+        """
+        Initialize with a list of token/cookie pairs
+        Each item should be: {"token": "xoxc-...", "cookies": "..."}
+        """
+        self.clients = []
+        self.current_index = 0
+        
+        for i, creds in enumerate(tokens_and_cookies):
+            client = SlackSearch(
+                token=creds["token"],
+                auth_mode='browser',
+                cookies=creds["cookies"],
+                workspace_url='https://modallabscommunity.slack.com'
+            )
+            self.clients.append(client)
+            print(f"Initialized search client {i+1}/{len(tokens_and_cookies)}")
+    
+    def get_next_client(self) -> SlackSearch:
+        """Get the next client in round-robin fashion"""
+        client = self.clients[self.current_index]
+        self.current_index = (self.current_index + 1) % len(self.clients)
+        return client
+    
+    def num_clients(self) -> int:
+        """Get the number of available clients"""
+        return len(self.clients)
+
+
 class RateLimiter:
-    """Simple rate limiter to ensure we don't exceed 20 requests per minute"""
-    def __init__(self, max_per_minute=20):
+    """Simple rate limiter to ensure we don't exceed rate limits across multiple tokens"""
+    def __init__(self, max_per_minute=20, num_tokens=1):
         self.max_per_minute = max_per_minute
-        self.min_interval = 60.0 / max_per_minute  # seconds between requests
+        self.num_tokens = num_tokens
+        # With multiple tokens, we can make more requests per minute
+        self.min_interval = 60.0 / (max_per_minute * num_tokens)  # seconds between requests
         self.last_request_time = 0
 
     async def wait_if_needed(self):
@@ -133,14 +166,14 @@ def rrf(all_rankings: List[List[str]], k: int = 60) -> List[str]:
     return [doc_id for doc_id, score in doc_id_and_scores]
 
 
-async def execute_searches(rate_limiter: RateLimiter, search_client: SlackSearch, search_terms: List[str]) -> List[Dict]:
-    """Execute multiple searches and return results"""
+async def execute_searches(rate_limiter: RateLimiter, client_pool: SearchClientPool, search_terms: List[str]) -> List[Dict]:
+    """Execute multiple searches using round-robin client selection"""
     results = []
     for i, term in enumerate(search_terms):
-        # Add 3 second delay between requests (except for the first one)
         try:
-
             await rate_limiter.wait_if_needed()
+            # Get next client in round-robin fashion
+            search_client = client_pool.get_next_client()
             result = await search_client.search_async(term, search_type="messages", count=100)
             results.append(asdict(result))
         except Exception as e:
@@ -154,12 +187,13 @@ def transform_results(
     timestamp_to_message_id: Dict[str, str],
     message_id_to_document_id: Dict[str, set],
     qrel_doc_ids: List[str] = None
-) -> tuple[List[str], List[int]]:
+) -> tuple[List[str], List[int], List[List[str]]]:
     """Transform Slack results to ranked document IDs using RRF
-    Returns: (document_ids, individual_query_ranks)
+    Returns: (document_ids, individual_query_ranks, individual_query_results)
     """
     all_rankings = []
     individual_query_ranks = []
+    individual_query_results = []  # Top 10 doc IDs for each query
 
     for i, result in enumerate(slack_results):
         ranking = []
@@ -174,18 +208,30 @@ def transform_results(
                 ranking.append(message_id)
         all_rankings.append(ranking)
         
+        # Convert message IDs to document IDs for this query
+        query_doc_ids = []
+        for mid in ranking[:50]:  # Process top 50 to ensure we get at least 10 unique docs
+            for doc_id in message_id_to_document_id.get(mid, set()):
+                if doc_id not in query_doc_ids:
+                    query_doc_ids.append(doc_id)
+                    if len(query_doc_ids) >= 10:  # Stop after 10 unique docs
+                        break
+            if len(query_doc_ids) >= 10:
+                break
+        
+        individual_query_results.append(query_doc_ids)
+        
         # Find rank of target in this individual query if qrel_doc_ids provided
         query_rank = 0
         if qrel_doc_ids:
-            # Convert message IDs to document IDs for this query
-            query_doc_ids = []
+            # Find rank of qrel document in the full list
+            all_query_doc_ids = []
             for mid in ranking:
                 for doc_id in message_id_to_document_id.get(mid, set()):
-                    if doc_id not in query_doc_ids:
-                        query_doc_ids.append(doc_id)
+                    if doc_id not in all_query_doc_ids:
+                        all_query_doc_ids.append(doc_id)
             
-            # Find rank of qrel document
-            for rank_idx, doc_id in enumerate(query_doc_ids):
+            for rank_idx, doc_id in enumerate(all_query_doc_ids):
                 if doc_id in qrel_doc_ids:
                     query_rank = rank_idx + 1
                     break
@@ -202,7 +248,7 @@ def transform_results(
             if doc_id not in document_ids:
                 document_ids.append(doc_id)
 
-    return document_ids, individual_query_ranks
+    return document_ids, individual_query_ranks, individual_query_results
 
 
 def get_qrel_rank(document_ids: List[str], qrel_doc_ids: List[str]) -> int:
@@ -271,7 +317,7 @@ async def automated_agent_loop(
     query: Dict,
     qrel_doc_ids: List[str],
     target_content: str,
-    search_client: SlackSearch,
+    client_pool: SearchClientPool,
     timestamp_to_message_id: Dict[str, str],
     message_id_to_document_id: Dict[str, set],
     documents: Dict[str, Dict],
@@ -298,22 +344,19 @@ async def automated_agent_loop(
             rank_str = f"rank {rank}" if rank > 0 else "NOT FOUND"
             previous_attempts += f"\nAttempt {i+1}: {json.dumps(search_calls)} -> Target document {rank_str} (RRF combined)\n"
             
-            # Show individual query performance
+            # Show individual query performance and top 10 results for each
+            individual_results = prev_step.get("individual_query_results", [])
             if individual_ranks and len(individual_ranks) == len(search_calls):
-                previous_attempts += "Individual query results:\n"
-                for j, (query, ind_rank) in enumerate(zip(search_calls, individual_ranks)):
+                for j, (qq, ind_rank, query_results) in enumerate(zip(search_calls, individual_ranks, individual_results)):
                     ind_rank_str = f"rank {ind_rank}" if ind_rank > 0 else "NOT FOUND"
-                    previous_attempts += f"  Query '{query}': {ind_rank_str}\n"
-            
-            # Show top 5 RRF results
-            top_results = prev_step.get("top_results", [])
-            if top_results:
-                previous_attempts += "\nTop 5 results after RRF + reranking:\n"
-                for j, doc_id in enumerate(top_results):
-                    doc = documents.get(doc_id, {})
-                    content = doc.get("content", "")[:150].replace('\n', ' ')
-                    is_target = doc_id in qrel_doc_ids
-                    previous_attempts += f"  {j+1}.{' [TARGET]' if is_target else ''} {content}...\n"
+                    previous_attempts += f"\nQuery '{qq}': Target {ind_rank_str}\n"
+                    if query_results:
+                        previous_attempts += "  Top 10 results:\n"
+                        for k, doc_id in enumerate(query_results[:10]):
+                            doc = documents.get(doc_id, {})
+                            content = doc.get("content", "")[:100].replace('\n', ' ')
+                            is_target = doc_id in qrel_doc_ids
+                            previous_attempts += f"    {k+1}.{' [TARGET]' if is_target else ''} {content}...\n"
 
         if not previous_attempts:
             previous_attempts = "No previous attempts yet."
@@ -347,10 +390,10 @@ async def automated_agent_loop(
         print(f"  🔍 Searching for: {search_queries}")
 
         # Execute searches
-        slack_results = await execute_searches(rate_limiter, search_client, search_queries)
+        slack_results = await execute_searches(rate_limiter, client_pool, search_queries)
 
         # Transform results
-        document_ids, individual_query_ranks = transform_results(
+        document_ids, individual_query_ranks, individual_query_results = transform_results(
             slack_results, timestamp_to_message_id, message_id_to_document_id, qrel_doc_ids
         )
         
@@ -388,9 +431,9 @@ async def automated_agent_loop(
         steps.append({
             "search_calls": search_queries,
             "individual_query_ranks": individual_query_ranks,
+            "individual_query_results": individual_query_results,  # Top 10 from each query
             "qrel_rank": qrel_rank,
-            "recall_at_20": recall_at_20,
-            "top_results": document_ids[:5]  # Store top 5 for showing to LLM
+            "recall_at_20": recall_at_20
         })
 
         # Display result
@@ -437,15 +480,25 @@ async def main():
 
     # Initialize clients
     print("Initializing clients...")
-    search_client = SlackSearch(
-        token="xoxc-3052645262231-9689129827878-9704176242193-ede9e23190f6b136aceaab8e42bd414808ddf9032c0d33aa33bcb9ae4410a5d8",
-        auth_mode='browser',
-        cookies='b=.693510bbd0d5677b628fff03f268acf4; d-s=1759520448; utm=%7B%7D; x=693510bbd0d5677b628fff03f268acf4.1760409378; shown_ssb_redirect_page=1; shown_download_ssb_modal=1; show_download_ssb_banner=1; no_download_ssb_banner=1; tz=-420; web_cache_last_updated5f1c2806a2541abd794aa08422f95de2=1760409445559; lc=1760410519; d=xoxd-HhQFLWY%2B0vp3R1qj1eDXWlR3Jj4kuvHRdPdUHUs%2FYKbKTAKhPdpUM%2BuR5EKcQtJIw7nmeL57HKM%2F3aY6FwNEf%2Fb6hcGBjKcHrDrooNTZhEJ0GI92aIlwJktXkV9amDk02Y1HsfBBYD6vp7UPpxHwCa%2Fq6zyfupwaHEFOn0Y5Th6CkrM1GL4aGy1GjWol6auPBfkOiBe5OQM%2B5EsIJZyVOdnWR11I; web_cache_last_updated34a7ff4d0b036d3d72ee8717822ef770=1760411388730',
-        workspace_url='https://modallabscommunity.slack.com'
-    )
-
+    
+    # Define tokens and cookies - you can add more here
+    tokens_and_cookies = [
+        {
+            "token": "xoxc-3052645262231-9689129827878-9704176242193-ede9e23190f6b136aceaab8e42bd414808ddf9032c0d33aa33bcb9ae4410a5d8",
+            "cookies": 'b=.693510bbd0d5677b628fff03f268acf4; d-s=1759520448; utm=%7B%7D; x=693510bbd0d5677b628fff03f268acf4.1760409378; shown_ssb_redirect_page=1; shown_download_ssb_modal=1; show_download_ssb_banner=1; no_download_ssb_banner=1; tz=-420; web_cache_last_updated5f1c2806a2541abd794aa08422f95de2=1760409445559; lc=1760410519; d=xoxd-HhQFLWY%2B0vp3R1qj1eDXWlR3Jj4kuvHRdPdUHUs%2FYKbKTAKhPdpUM%2BuR5EKcQtJIw7nmeL57HKM%2F3aY6FwNEf%2Fb6hcGBjKcHrDrooNTZhEJ0GI92aIlwJktXkV9amDk02Y1HsfBBYD6vp7UPpxHwCa%2Fq6zyfupwaHEFOn0Y5Th6CkrM1GL4aGy1GjWol6auPBfkOiBe5OQM%2B5EsIJZyVOdnWR11I; web_cache_last_updated34a7ff4d0b036d3d72ee8717822ef770=1760411388730'
+        },
+        {
+            "token": "xoxc-3052645262231-9641512460897-9626513329798-19e797687a5e0bb7539701cd740f4a9b3c98f040ebd6213e7f33577468f85c6d",
+            "cookies": 'utm=%7B%7D; d=xoxd-9jnd5xe9oeEUyLp%2BRKca5gj8q52vJn6HmzamGg6lmEe6lt2qvUO9qlhpnpwxYOL%2BNXsgi02JupH%2F0rv2ZSWMFhXcpokUbyyruy3%2FzQuAZGcU5naZQmwOyzshjHIp9%2B7hHId567haJOfjL63ak6Gln7ui6sZG413neXIOiz%2FPs6J5OI9aMJanpXQDW7szEUQ0TdcU8ZBcUrdcoYyI0rFMuD65; x=f3db5096c114fdcea90c10e9316228dc.1760473163; shown_ssb_redirect_page=1; OptanonConsent=isGpcEnabled=0&datestamp=Sun+Oct+12+2025+12%3A14%3A38+GMT-0700+(Pacific+Daylight+Time)&version=202402.1.0&browserGpcFlag=0&isIABGlobal=false&hosts=&consentId=1ff3be3e-e588-4932-9ac3-2630dd7c33aa&interactionCount=1&isAnonUser=1&landingPath=NotLandingPage&groups=1%3A1%2C3%3A1%2C2%3A1%2C4%3A1&AwaitingReconsent=false; _ga=GA1.1.221978663.1757447861; _ga_QTJQME5M5D=GS2.1.s1760296466$o9$g0$t1760296466$j60$l0$h0; _cs_cvars=%7B%7D; _cs_id=65bbed2f-e942-a0d8-ff58-7364edf3ae6f.1757447860.14.1760296466.1760296466.1.1791611860287.1.x; _lc2_fpi_js=e00b11ac9c9b--01k4r0wbxafwq3ab8a66d6tj9e; _li_dcdm_c=.slack.com; _li_ss=ClkKBgj5ARD1GwoFCAoQ9RsKBgikARD5GwoGCN0BEPUbCgYI4QEQ9RsKBgiBARD1GwoGCKIBEPUbCgkI_____wcQ-RsKBQh-EPUbCgYIiQEQ-RsKBgilARD5Gw; cjConsent=MHxOfDB8Tnww; cjUser=7ca4c4b8-116d-45aa-ad4c-88a5d183fc3d; PageCount=1; ssb_instance_id=b9822ad1-6df9-40d2-8374-d0b286d41559; d-s=1760296437; no_download_ssb_banner=1; show_download_ssb_banner=1; shown_download_ssb_modal=1; _fbp=fb.1.1759438148806.71444673446120306; lc=1759536553; optimizelySession=0; _gcl_au=1.1.536689637.1757447861.707819349.1759440091.1759440092; _cs_c=0; _lc2_fpi=e00b11ac9c9b--01k4r0wbxafwq3ab8a66d6tj9e; tz=-420; b=.f3db5096c114fdcea90c10e9316228dc'
+        }
+    ]
+    
+    client_pool = SearchClientPool(tokens_and_cookies)
     openai_client = openai.AsyncOpenAI()
-    rate_limiter = RateLimiter(max_per_minute=18)  # Leave some buffer
+    
+    # Adjust rate limiter based on number of tokens
+    rate_limiter = RateLimiter(max_per_minute=18, num_tokens=client_pool.num_clients())
+    print(f"Rate limiting configured for {client_pool.num_clients()} tokens: {rate_limiter.min_interval:.2f}s between requests")
 
     # Get all queries in sequential order
     query_ids = sorted(list(queries.keys()))
@@ -491,7 +544,7 @@ async def main():
 
         # Run agent loop
         trace = await automated_agent_loop(
-            query, qrel_doc_ids, target_content, search_client,
+            query, qrel_doc_ids, target_content, client_pool,
             timestamp_to_message_id, message_id_to_document_id, documents,
             openai_client, rate_limiter, RERANK_MODEL
         )
