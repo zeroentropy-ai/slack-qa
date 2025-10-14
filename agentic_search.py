@@ -19,14 +19,14 @@ RERANK_MODEL = AIRerankModel(
 )
 
 # Agent configuration
-SYSTEM_PROMPT = """Your job is to find a single Slack message that answers a query best.
+SYSTEM_PROMPT = """Your job is to find a single Slack message that answers a query.
 
-Given a user query and optionally the target document content, keyword-based search queries that would help find relevant Slack messages.
+Given a user query and optionally the target document content, generate keyword-based search calls that would help find relevant Slack messages.
 
-IMPORTANT: You can generate up to 4 search queries. These will be searched INDEPENDENTLY and then combined using Reciprocal Rank Fusion (RRF) to produce a final ranking. This means:
-- Each query is searched separately
-- Results from all queries are merged
-- Documents appearing in multiple search results will be ranked higher
+IMPORTANT: You can generate up to 10 search calls (generally 3-4 should be usual). These will be searched INDEPENDENTLY and then combined using Reciprocal Rank Fusion (RRF) to produce a final ranking. This means:
+- Each query is searched separately. Presumably it does something similar to Bm25 (results contain all keywords in the search query)
+- Results from all calls are merged using RRF
+- Documents appearing in multiple search results will get ranked higher
 
 Each search query should be 1-3 keywords that someone might use to find the information from the slack search box.
 
@@ -37,14 +37,8 @@ Think about:
 - Related concepts that might appear in the same conversation
 - Different ways people might phrase the same concept
 
-Output ONLY a JSON object with one of these formats:
-1. Search: {"search": ["modal error", "connection timeout", "gpu memory", "modal timeout issue"]}  // Up to 4 queries
-2. Mark as problematic: {"mark_problematic": true, "reason": "Brief explanation"}  // When the query cannot be solved due to data format issues
-
-Use option 2 when:
-- You find content that matches the target but it's never ranked highly (likely due to ID mismatch)
-- The same bot/template response appears multiple times making it impossible to identify the specific instance
-- Other data formatting issues prevent finding the exact document
+Output ONLY a JSON object with this format:
+{"search": ["modal error", "connection timeout", "gpu memory", "modal timeout issue"]}  // Up to 4 calls
 """
 
 USER_PROMPT_TEMPLATE = """User query: {query}
@@ -57,7 +51,7 @@ Previous attempts and their results:
 
 You have a maximum of 10 search attempts to get the target document to rank 1.
 
-Generate up to 4 new search queries. Remember: Multiple queries will be combined with RRF, so diverse queries covering different aspects can be very effective.
+Generate up to 10 (but median of 3) new search queries. Remember: Multiple queries will be combined with RRF, so diverse queries covering different aspects can be very effective.
 
 If previous attempts had high ranks (far from 1), try significantly different keywords or approaches.
 If previous attempts had low ranks (close to 1), examine the top results shown above and make small refinements to push the target to rank 1.
@@ -158,21 +152,45 @@ async def execute_searches(rate_limiter: RateLimiter, search_client: SlackSearch
 def transform_results(
     slack_results: List[Dict],
     timestamp_to_message_id: Dict[str, str],
-    message_id_to_document_id: Dict[str, set]
-) -> List[str]:
-    """Transform Slack results to ranked document IDs using RRF"""
+    message_id_to_document_id: Dict[str, set],
+    qrel_doc_ids: List[str] = None
+) -> tuple[List[str], List[int]]:
+    """Transform Slack results to ranked document IDs using RRF
+    Returns: (document_ids, individual_query_ranks)
+    """
     all_rankings = []
+    individual_query_ranks = []
 
     for i, result in enumerate(slack_results):
         ranking = []
         matches = result.get("matches", [])
         print(f"    Search {i+1} returned {len(matches)} matches")
+        
+        # Build ranking for this query
         for match in matches:
             ts = match.get("ts", "")
             message_id = timestamp_to_message_id.get(ts, "")
             if message_id:
                 ranking.append(message_id)
         all_rankings.append(ranking)
+        
+        # Find rank of target in this individual query if qrel_doc_ids provided
+        query_rank = 0
+        if qrel_doc_ids:
+            # Convert message IDs to document IDs for this query
+            query_doc_ids = []
+            for mid in ranking:
+                for doc_id in message_id_to_document_id.get(mid, set()):
+                    if doc_id not in query_doc_ids:
+                        query_doc_ids.append(doc_id)
+            
+            # Find rank of qrel document
+            for rank_idx, doc_id in enumerate(query_doc_ids):
+                if doc_id in qrel_doc_ids:
+                    query_rank = rank_idx + 1
+                    break
+        
+        individual_query_ranks.append(query_rank)
 
     # Apply RRF to get unified ranking of message IDs
     message_ids = rrf(all_rankings)
@@ -184,7 +202,7 @@ def transform_results(
             if doc_id not in document_ids:
                 document_ids.append(doc_id)
 
-    return document_ids
+    return document_ids, individual_query_ranks
 
 
 def get_qrel_rank(document_ids: List[str], qrel_doc_ids: List[str]) -> int:
@@ -276,17 +294,26 @@ async def automated_agent_loop(
         for i, prev_step in enumerate(steps):
             search_calls = prev_step["search_calls"]
             rank = prev_step["qrel_rank"]
+            individual_ranks = prev_step.get("individual_query_ranks", [])
             rank_str = f"rank {rank}" if rank > 0 else "NOT FOUND"
-            previous_attempts += f"\nAttempt {i+1}: {json.dumps(search_calls)} -> Target document {rank_str}\n"
+            previous_attempts += f"\nAttempt {i+1}: {json.dumps(search_calls)} -> Target document {rank_str} (RRF combined)\n"
             
-            # Include top 5 results from this attempt
-            if "document_ids" in prev_step and prev_step["document_ids"]:
-                previous_attempts += "Top 5 results:\n"
-                for j, doc_id in enumerate(prev_step["document_ids"][:5]):
+            # Show individual query performance
+            if individual_ranks and len(individual_ranks) == len(search_calls):
+                previous_attempts += "Individual query results:\n"
+                for j, (query, ind_rank) in enumerate(zip(search_calls, individual_ranks)):
+                    ind_rank_str = f"rank {ind_rank}" if ind_rank > 0 else "NOT FOUND"
+                    previous_attempts += f"  Query '{query}': {ind_rank_str}\n"
+            
+            # Show top 5 RRF results
+            top_results = prev_step.get("top_results", [])
+            if top_results:
+                previous_attempts += "\nTop 5 results after RRF + reranking:\n"
+                for j, doc_id in enumerate(top_results):
                     doc = documents.get(doc_id, {})
                     content = doc.get("content", "")[:150].replace('\n', ' ')
                     is_target = doc_id in qrel_doc_ids
-                    previous_attempts += f"  Rank {j+1}{' [TARGET]' if is_target else ''}: {content}...\n"
+                    previous_attempts += f"  {j+1}.{' [TARGET]' if is_target else ''} {content}...\n"
 
         if not previous_attempts:
             previous_attempts = "No previous attempts yet."
@@ -307,33 +334,6 @@ async def automated_agent_loop(
             print(f"  ⚠️  Invalid action format, skipping...")
             continue
         
-        # Handle mark_problematic action
-        if action.get("mark_problematic"):
-            step += 1
-            print(f"\n  Step {step}/{MAX_STEPS}")
-            reason = action.get("reason", "No reason provided")
-            print(f"  🚫 Marking query as problematic: {reason}")
-            
-            # Record this as a final step
-            steps.append({
-                "search_calls": [],
-                "reasoning": f"Marked as problematic: {reason}",
-                "qrel_rank": steps[-1].get("qrel_rank", 0) if steps else 0,
-                "action": "mark_problematic",
-                "problem_reason": reason
-            })
-            
-            # Mark as problematic in the trace
-            return {
-                "query": query["query"],
-                "query_id": query["id"],
-                "steps": steps,
-                "found": False,
-                "best_recall_at_20": max((s.get("recall_at_20", 0) for s in steps if "recall_at_20" in s), default=0),
-                "problematic": True,
-                "problem_reason": reason
-            }
-        
         # Handle search action
         search_queries = action.get("search", [])
         if not search_queries:
@@ -350,7 +350,9 @@ async def automated_agent_loop(
         slack_results = await execute_searches(rate_limiter, search_client, search_queries)
 
         # Transform results
-        document_ids = transform_results(slack_results, timestamp_to_message_id, message_id_to_document_id)
+        document_ids, individual_query_ranks = transform_results(
+            slack_results, timestamp_to_message_id, message_id_to_document_id, qrel_doc_ids
+        )
         
         # Rerank all documents if we have results
         if document_ids:
@@ -385,10 +387,10 @@ async def automated_agent_loop(
         # Record step
         steps.append({
             "search_calls": search_queries,
-            "reasoning": f"AI generated based on rank {steps[-1]['qrel_rank'] if steps else 'N/A'}",
+            "individual_query_ranks": individual_query_ranks,
             "qrel_rank": qrel_rank,
             "recall_at_20": recall_at_20,
-            "document_ids": document_ids[:30]  # Store top 30 for viewing
+            "top_results": document_ids[:5]  # Store top 5 for showing to LLM
         })
 
         # Display result
@@ -402,6 +404,10 @@ async def automated_agent_loop(
             print(f"  📊 Target document found at rank {qrel_rank} (within recall@20)")
         else:
             print(f"  📊 Target document found at rank {qrel_rank} (outside recall@20)")
+        
+        # Display individual query performance
+        if individual_query_ranks and len(individual_query_ranks) == len(search_queries):
+            print(f"  📋 Individual query ranks: {dict(zip(search_queries, individual_query_ranks))}")
 
     # Calculate best recall@20 across all attempts
     best_recall_at_20 = max((step.get("recall_at_20", 0) for step in steps if "recall_at_20" in step), default=0)
@@ -497,26 +503,6 @@ async def main():
         # Save traces after each completion
         with open("automated_agent_traces.json", "w") as f:
             json.dump(traces_dict, f, indent=2)
-            
-        # If problematic, also save to separate file
-        if trace.get("problematic"):
-            problematic_queries = {}
-            try:
-                with open("problematic_queries.json", "r") as f:
-                    problematic_queries = json.load(f)
-            except FileNotFoundError:
-                pass
-            
-            problematic_queries[query_id] = {
-                "query": trace["query"],
-                "query_id": trace["query_id"],
-                "reason": trace.get("problem_reason", "Unknown"),
-                "best_rank_achieved": min((s["qrel_rank"] for s in trace["steps"] if s["qrel_rank"] > 0), default=0),
-                "attempts": len([s for s in trace["steps"] if s.get("search_calls")])
-            }
-            
-            with open("problematic_queries.json", "w") as f:
-                json.dump(problematic_queries, f, indent=2)
 
     # Summary
     print(f"\n\n{'='*80}")
@@ -534,12 +520,10 @@ async def main():
     if session_traces:
         success_count = sum(1 for t in session_traces if t["found"])
         recall_20_count = sum(1 for t in session_traces if t.get("best_recall_at_20", 0) == 1)
-        problematic_count = sum(1 for t in session_traces if t.get("problematic", False))
         
         print(f"\nSession stats (queries attempted: {len(session_traces)}):")
         print(f"  Success rate (rank 1): {success_count}/{len(session_traces)} ({100*success_count/len(session_traces):.1f}%)")
         print(f"  Recall@20: {recall_20_count}/{len(session_traces)} ({100*recall_20_count/len(session_traces):.1f}%)")
-        print(f"  Problematic queries: {problematic_count}/{len(session_traces)} ({100*problematic_count/len(session_traces):.1f}%)")
         
         avg_steps = sum(len(t["steps"]) for t in session_traces) / len(session_traces)
         print(f"  Average steps per query: {avg_steps:.1f}")
@@ -550,22 +534,11 @@ async def main():
         print(f"\nOverall stats (all {len(all_traces)} queries in file):")
         success_count_all = sum(1 for t in all_traces if t["found"])
         recall_20_count_all = sum(1 for t in all_traces if t.get("best_recall_at_20", 0) == 1)
-        problematic_count_all = sum(1 for t in all_traces if t.get("problematic", False))
         
         print(f"  Success rate (rank 1): {success_count_all}/{len(all_traces)} ({100*success_count_all/len(all_traces):.1f}%)")
         print(f"  Recall@20: {recall_20_count_all}/{len(all_traces)} ({100*recall_20_count_all/len(all_traces):.1f}%)")
-        print(f"  Problematic queries: {problematic_count_all}/{len(all_traces)} ({100*problematic_count_all/len(all_traces):.1f}%)")
     
     print(f"\nTraces saved to: automated_agent_traces.json")
-    
-    # Check if problematic queries file exists
-    try:
-        with open("problematic_queries.json", "r") as f:
-            problematic = json.load(f)
-            if problematic:
-                print(f"Problematic queries saved to: problematic_queries.json ({len(problematic)} total)")
-    except FileNotFoundError:
-        pass
 
 
 if __name__ == "__main__":
