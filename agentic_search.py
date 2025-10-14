@@ -9,7 +9,14 @@ import openai
 import difflib
 
 from slack_search import SlackSearch
+from ai import AIRerankModel, ai_rerank
 
+
+# Rerank model configuration
+RERANK_MODEL = AIRerankModel(
+    company="zeroentropy",
+    model="zerank-1",
+)
 
 # Agent configuration
 SYSTEM_PROMPT = """Your job is to find a single Slack message that answers a query best.
@@ -42,7 +49,7 @@ Use option 2 when:
 
 USER_PROMPT_TEMPLATE = """User query: {query}
 
-Target document preview (first 300 chars):
+Target document:
 {target_preview}
 
 Previous attempts and their results:
@@ -156,9 +163,11 @@ def transform_results(
     """Transform Slack results to ranked document IDs using RRF"""
     all_rankings = []
 
-    for result in slack_results:
+    for i, result in enumerate(slack_results):
         ranking = []
-        for match in result.get("matches", []):
+        matches = result.get("matches", [])
+        print(f"    Search {i+1} returned {len(matches)} matches")
+        for match in matches:
             ts = match.get("ts", "")
             message_id = timestamp_to_message_id.get(ts, "")
             if message_id:
@@ -249,7 +258,8 @@ async def automated_agent_loop(
     message_id_to_document_id: Dict[str, set],
     documents: Dict[str, Dict],
     openai_client: openai.AsyncOpenAI,
-    rate_limiter: RateLimiter
+    rate_limiter: RateLimiter,
+    rerank_model: AIRerankModel
 ) -> Dict[str, Any]:
     """Run the automated agent loop for a single query"""
     MAX_STEPS = 10
@@ -258,9 +268,7 @@ async def automated_agent_loop(
     step = 0
 
     # Prepare target preview
-    target_preview = target_content[:300].replace('\n', ' ')
-    if len(target_content) > 300:
-        target_preview += "..."
+    target_preview = target_content
 
     while step < MAX_STEPS and not found:
         # Format previous attempts with results
@@ -343,6 +351,30 @@ async def automated_agent_loop(
 
         # Transform results
         document_ids = transform_results(slack_results, timestamp_to_message_id, message_id_to_document_id)
+        
+        # Rerank all documents if we have results
+        if document_ids:
+            # Get document texts for reranking
+            texts_to_rerank = []
+            for doc_id in document_ids:
+                doc = documents.get(doc_id, {})
+                content = doc.get("content", "")
+                texts_to_rerank.append(content)
+            
+            # Rerank using the model
+            print(f"  🔄 Reranking {len(document_ids)} results...")
+            rerank_scores = await ai_rerank(
+                model=rerank_model,
+                query=query["query"],
+                texts=texts_to_rerank,
+            )
+            
+            # Sort documents by rerank scores
+            doc_score_pairs = list(zip(document_ids, rerank_scores))
+            doc_score_pairs.sort(key=lambda x: -x[1])  # Sort by score descending
+            
+            # Update document_ids with reranked order
+            document_ids = [doc_id for doc_id, _ in doc_score_pairs]
 
         # Get rank of qrel document
         qrel_rank = get_qrel_rank(document_ids, qrel_doc_ids)
@@ -455,7 +487,7 @@ async def main():
         trace = await automated_agent_loop(
             query, qrel_doc_ids, target_content, search_client,
             timestamp_to_message_id, message_id_to_document_id, documents,
-            openai_client, rate_limiter
+            openai_client, rate_limiter, RERANK_MODEL
         )
 
         # Update traces dict
