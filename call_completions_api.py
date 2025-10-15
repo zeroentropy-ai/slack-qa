@@ -22,7 +22,7 @@ response = requests.post(
         "max_tokens": 100,
         "temperature": 0.0,
         "stop": ["</assistant>", "<user>"],
-        "model": "Qwen3/Qwen3-8B"
+        "model": "Qwen/Qwen3-8B"
     }
 )
 
