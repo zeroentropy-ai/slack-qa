@@ -20,32 +20,22 @@ RERANK_MODEL = AIRerankModel(
 )
 
 # Agent configuration
-SYSTEM_PROMPT = """Your job is to find a single Slack message that answers a query.
+SYSTEM_PROMPT = """Your job is to find a target message by searching a corpus of slack messages by keyword search.
 
 Given a user query and optionally the target document content, generate keyword-based search calls that would help find relevant Slack messages.
 
-IMPORTANT: You can generate up to 10 search calls (generally 3-4 should be usual). These will be searched INDEPENDENTLY and then combined using Reciprocal Rank Fusion (RRF) to produce a final ranking. This means:
+IMPORTANT: You can generate up to 10 search calls. These will be searched INDEPENDENTLY and then combined using Reciprocal Rank Fusion (RRF) to produce a final ranking. This means:
 - Each query is searched separately. Presumably it does something similar to Bm25 (results contain all keywords in the search query)
 - Results from all calls are merged using RRF
 - Documents appearing in multiple search results will get ranked higher
 
 Each search query should be 1-3 keywords that someone might use to find the information from the slack search box.
 
-Think about:
-- Key technical terms or product names mentioned
-- Actions or problems described
-- Specific error messages or codes
-- Related concepts that might appear in the same conversation
-- Different ways people might phrase the same concept
-
 Output ONLY a JSON object with this format:
-{"search": ["modal error", "connection timeout", "gpu memory", "modal timeout issue"]}  // Up to 4 calls
+{"search": ["modal error", "connection timeout", "gpu memory", "modal timeout issue"]}  // Up to 10 calls
 """
 
 USER_PROMPT_TEMPLATE = """User query: {query}
-
-Target document:
-{target_preview}
 
 Previous attempts and their results:
 {previous_attempts}
