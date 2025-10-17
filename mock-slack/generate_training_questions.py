@@ -11,6 +11,7 @@ import random
 import uuid
 import os
 import time
+import requests
 from typing import Dict, List, Any, Optional
 from tqdm import tqdm
 import openai
@@ -18,10 +19,58 @@ import openai
 # Set up OpenAI
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-def load_documents(file_path: str = "traingen_documents.json") -> List[Dict[str, Any]]:
-    """Load documents from JSON file"""
-    with open(file_path, 'r') as f:
-        return json.load(f)
+# Solr configuration
+SOLR_URL = "http://localhost:8983/solr"
+COLLECTION = "training-slack"
+
+def load_documents_from_solr(collection: str = COLLECTION, sample_size: int = 5000) -> List[Dict[str, Any]]:
+    """Load documents from Solr collection"""
+    try:
+        # Get random sample of documents
+        url = f"{SOLR_URL}/{collection}/select"
+        params = {
+            "q": "*:*",
+            "rows": sample_size,
+            "sort": "random_1234 desc",  # Random sort
+            "fl": "id,content,workspace,channel,timestamp,type"
+        }
+        
+        response = requests.get(url, params=params)
+        if response.status_code == 200:
+            result = response.json()
+            docs = result['response']['docs']
+            
+            # Convert to expected format
+            formatted_docs = []
+            for doc in docs:
+                # Handle case where content might be a list
+                content = doc.get('content', '')
+                if isinstance(content, list):
+                    content = ' '.join(str(x) for x in content)
+                elif not isinstance(content, str):
+                    content = str(content)
+                    
+                formatted_doc = {
+                    "id": doc['id'],
+                    "content": content,
+                    "metadata": {
+                        "dataset": doc.get('workspace', 'slack'),
+                        "title": f"{doc.get('channel', 'unknown')}/{doc.get('type', 'message')}",
+                        "workspace": doc.get('workspace', ''),
+                        "channel": doc.get('channel', ''),
+                        "timestamp": doc.get('timestamp', '')
+                    }
+                }
+                formatted_docs.append(formatted_doc)
+            
+            return formatted_docs
+        else:
+            print(f"❌ Failed to load documents from Solr: {response.text}")
+            return []
+            
+    except Exception as e:
+        print(f"❌ Error loading documents from Solr: {e}")
+        return []
 
 def is_suitable_for_question(content: str, dataset: str) -> bool:
     """
@@ -53,7 +102,10 @@ Dataset: {dataset}"""
             max_tokens=10
         )
         
-        answer = response.choices[0].message.content.strip().upper()
+        content = response.choices[0].message.content
+        if content is None:
+            return False
+        answer = content.strip().upper()
         return answer == "YES"
         
     except Exception as e:
@@ -67,8 +119,8 @@ def generate_question(content: str, title: str, dataset: str) -> Optional[str]:
     Generate a natural question that this document could answer.
     The question should be something a user might realistically ask.
     """
-    
-    prompt = f"""Generate a natural, realistic question that someone might ask an AI assistant, where this document would be a good answer.
+
+    prompt = f"""Generate a natural, realistic question that someone might ask an AI assistant, where this document would provide the answer.
 
 Requirements:
 - The question should be specific and actionable
@@ -76,9 +128,7 @@ Requirements:
 - Don't just rephrase the content - ask what someone would want to KNOW
 - Make it a question someone would search for or ask a chatbot
 
-Document title: {title}
-Document content: {content[:1000]}
-Dataset: {dataset}
+Document content: {content}
 
 Generate only the question, nothing else."""
 
@@ -90,7 +140,10 @@ Generate only the question, nothing else."""
             max_tokens=100
         )
         
-        question = response.choices[0].message.content.strip()
+        content = response.choices[0].message.content
+        if content is None:
+            return None
+        question = content.strip()
         
         # Clean up the question
         if not question.endswith('?'):
@@ -103,39 +156,44 @@ Generate only the question, nothing else."""
         return None
 
 def generate_training_data(
-    input_file: str = "traingen_documents.json",
     output_file: str = "training_data_step_0.json", 
     target_count: int = 1000,
     sample_size: int = 5000
 ) -> List[Dict[str, Any]]:
     """
-    Generate training data by sampling documents and creating questions.
+    Generate training data by sampling documents from Solr and creating questions.
     
     Args:
-        input_file: Input document file
         output_file: Output training data file
         target_count: Target number of training examples
         sample_size: Number of documents to sample for evaluation
     """
     
-    print(f"Loading documents from {input_file}...")
-    documents = load_documents(input_file)
+    print(f"Loading documents from Solr collection '{COLLECTION}'...")
+    documents = load_documents_from_solr(COLLECTION, sample_size)
     
     print(f"Loaded {len(documents):,} documents")
-    print(f"Sampling {sample_size:,} documents for evaluation...")
     
-    # Randomly sample documents
-    sampled_docs = random.sample(documents, min(sample_size, len(documents)))
+    if not documents:
+        print("❌ No documents loaded from Solr")
+        return []
+    
+    # Documents are already sampled from Solr
+    sampled_docs = documents
     
     training_data = []
     suitable_count = 0
     
     for doc in tqdm(sampled_docs, desc="Processing documents"):
         # Check if document is suitable
-        is_suitable = is_suitable_for_question(
-            doc['content'], 
-            doc['metadata']['dataset']
-        )
+        content = doc.get('content', '')
+        dataset = doc.get('metadata', {}).get('dataset', '')
+        
+        # Skip if content is not a string
+        if not isinstance(content, str):
+            continue
+            
+        is_suitable = is_suitable_for_question(content, dataset)
         
         if is_suitable:
             suitable_count += 1

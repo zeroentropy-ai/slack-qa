@@ -13,7 +13,7 @@ def load_search_queries(file_path: str = "search_queries_step_0.json") -> List[D
     with open(file_path, 'r') as f:
         return json.load(f)
 
-def test_single_query(search_query: str, target_document_id: str, collection: str = "train_data") -> Dict[str, Any]:
+def test_single_query(search_query: str, target_document_id: str, collection: str = "training-slack") -> Dict[str, Any]:
     """
     Test a single search query against Solr and return results.
     
@@ -197,7 +197,7 @@ Generate search queries as a JSON list of strings. Focus on different ways someo
 def test_search_queries(
     input_file: str = "search_queries_step_0.json",
     output_file: str = "search_queries_with_results.json",
-    collection: str = "train_data"
+    collection: str = "training-slack"
 ) -> List[Dict[str, Any]]:
     """
     Test all search queries and augment with Solr results.
@@ -338,7 +338,7 @@ def main():
     
     # Configuration
     input_file = "search_queries_step_0.json"
-    collection = input("Solr collection name (default 'train_data'): ").strip() or "train_data"
+    collection = input("Solr collection name (default 'training-slack'): ").strip() or "training-slack"
     
     # Check if input file exists
     import os
