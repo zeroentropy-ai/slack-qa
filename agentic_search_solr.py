@@ -21,7 +21,7 @@ RERANK_MODEL = AIRerankModel(
 )
 
 # Solr configuration
-SOLR_COLLECTION = "training-slack"
+SOLR_COLLECTION = "slack"
 
 # Agent configuration
 SYSTEM_PROMPT = """Your job is to find a set of 5-7 shortest possible keyword search queries that lead to a target document being found in the top 20 results. Each keyword search must use diverse search terms.
@@ -105,7 +105,7 @@ def load_data():
     documents = {}
     target_doc_by_query = {}
     
-    with open("./mock-slack/training_data_step_0.json") as f:
+    with open("./finetune_queries_training_data.json") as f:
         training_data = json.load(f)
     
     for item in training_data:
@@ -321,6 +321,7 @@ async def automated_agent_loop(
             search_calls = prev_step["search_calls"]
             rank = prev_step["target_rank"]
             individual_ranks = prev_step.get("individual_query_ranks", [])
+            print(search_calls, " ", rank)
             
             # Create JSON format showing query -> rank mapping
             query_rank_map = {}
