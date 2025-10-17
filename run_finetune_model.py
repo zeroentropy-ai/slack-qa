@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""
+Run few-shot prompted model on all test queries and save results for benchmarking
+"""
+
+import json
+import subprocess
+import sys
+import time
+from datetime import datetime
+
+def load_test_queries(queries_file="./synthetic_data/Modal_Community_T031JJZ7Q6T/beir_format_individual_message/queries.jsonl"):
+    """Load all test queries"""
+    queries = {}
+    with open(queries_file, 'r') as f:
+        for line in f:
+            if "{" in line:
+                query = json.loads(line)
+                queries[query["id"]] = query
+    return queries
+
+def run_single_query(query_text):
+    """Run the completions API script for a single query"""
+    try:
+        # Run the script and capture output
+        result = subprocess.run(
+            ["python3", "call_completions_api.py", query_text],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if result.returncode == 0:
+            # Parse the output from completions API
+            try:
+                output_lines = result.stdout.strip().split('\n')
+                
+                # Find the generated search queries line
+                generated_text = None
+                for line in output_lines:
+                    if line.startswith('[') and line.endswith(']'):
+                        generated_text = line
+                        break
+                
+                if generated_text:
+                    searches = json.loads(generated_text)
+                    return searches, None
+                else:
+                    # If no JSON found, return the raw output for debugging
+                    return None, f"No JSON found in output: {result.stdout}"
+                    
+            except json.JSONDecodeError:
+                return None, f"Invalid JSON: {result.stdout}"
+        else:
+            return None, f"Script error: {result.stderr}"
+            
+    except subprocess.TimeoutExpired:
+        return None, "Timeout after 30 seconds"
+    except Exception as e:
+        return None, f"Error: {str(e)}"
+
+def main():
+    print("Loading test queries...")
+    queries = load_test_queries()
+    print(f"Loaded {len(queries)} queries")
+    
+    # Prepare output
+    results = []
+    start_time = datetime.now()
+    
+    # Process each query
+    for i, (query_id, query_data) in enumerate(queries.items()):
+        query_text = query_data["query"]
+        print(f"\n[{i+1}/{len(queries)}] Processing: {query_text[:80]}...")
+        
+        # Run the model
+        searches, error = run_single_query(query_text)
+        
+        if searches:
+            print(f"  ✓ Generated {len(searches)} search queries")
+            results.append({
+                "query_id": query_id,
+                "query": query_text,
+                "generated_searches": searches,
+                "status": "success"
+            })
+        else:
+            print(f"  ✗ Failed: {error}")
+            results.append({
+                "query_id": query_id,
+                "query": query_text,
+                "generated_searches": [],
+                "status": "error",
+                "error": error
+            })
+        
+        # Save progress every 20 queries
+        if (i + 1) % 20 == 0:
+            with open("fintune_results_progress.json", 'w') as f:
+                json.dump(results, f, indent=2)
+            print(f"  💾 Saved progress ({i+1} queries)")
+    
+    # Final save
+    output_file = f"finetune_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    with open(output_file, 'w') as f:
+        json.dump(results, f, indent=2)
+    
+    # Statistics
+    end_time = datetime.now()
+    duration = (end_time - start_time).total_seconds()
+    success_count = sum(1 for r in results if r["status"] == "success")
+    
+    print("\n" + "="*60)
+    print("BENCHMARK COMPLETE")
+    print("="*60)
+    print(f"Total queries: {len(queries)}")
+    print(f"Successful: {success_count} ({success_count/len(queries)*100:.1f}%)")
+    print(f"Failed: {len(queries) - success_count}")
+    print(f"Time taken: {duration:.1f} seconds")
+    print(f"Avg time per query: {duration/len(queries):.2f} seconds")
+    print(f"\nResults saved to: {output_file}")
+    
+    # Save summary
+    summary = {
+        "total_queries": len(queries),
+        "successful": success_count,
+        "failed": len(queries) - success_count,
+        "duration_seconds": duration,
+        "avg_time_per_query": duration/len(queries),
+        "timestamp": datetime.now().isoformat(),
+        "output_file": output_file
+    }
+    
+if __name__ == "__main__":
+    main()
