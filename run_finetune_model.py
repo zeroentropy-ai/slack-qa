@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
 Run few-shot prompted model on all test queries and save results for benchmarking
+Can use either local finetuned model or OpenAI API with --openai flag
 """
 
 import json
 import subprocess
 import sys
 import time
+import argparse
 from datetime import datetime
 from garbage import CHANNEL_ACTIVITY, TICKET_ACTIVITY, HELP_US_HELP
 
@@ -40,12 +42,18 @@ def load_test_queries(queries_file="./synthetic_data/Modal_Community_T031JJZ7Q6T
                 queries[query["id"]] = query
     return queries
 
-def run_single_query(query_text):
+def run_single_query(query_text, use_openai=False):
     """Run the completions API script for a single query"""
     try:
+        # Choose which script to run based on the flag
+        if use_openai:
+            script_name = "call_openai_completions.py"
+        else:
+            script_name = "call_completions_api.py"
+            
         # Run the script and capture output
         result = subprocess.run(
-            ["python3", "call_completions_api.py", query_text],
+            ["python3", script_name, query_text],
             capture_output=True,
             text=True,
             timeout=30
@@ -81,6 +89,17 @@ def run_single_query(query_text):
         return None, f"Error: {str(e)}"
 
 def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Run few-shot prompted model on test queries")
+    parser.add_argument("--openai", action="store_true", 
+                       help="Use OpenAI API instead of local finetuned model")
+    parser.add_argument("--limit", type=int, default=None,
+                       help="Limit number of queries to process (for testing)")
+    args = parser.parse_args()
+    
+    model_type = "OpenAI" if args.openai else "Finetuned"
+    print(f"Using {model_type} model...")
+    
     print("Loading test queries...")
     queries = load_test_queries()
     print(f"Loaded {len(queries)} queries")
@@ -101,6 +120,12 @@ def main():
     print(f"Processing {len(non_garbage_queries)} non-garbage queries")
     queries = non_garbage_queries
     
+    # Apply limit if specified
+    if args.limit:
+        query_items = list(queries.items())[:args.limit]
+        queries = dict(query_items)
+        print(f"Limited to first {len(queries)} queries for testing")
+    
     # Prepare output
     results = []
     start_time = datetime.now()
@@ -111,7 +136,7 @@ def main():
         print(f"\n[{i+1}/{len(queries)}] Processing: {query_text[:80]}...")
         
         # Run the model
-        searches, error = run_single_query(query_text)
+        searches, error = run_single_query(query_text, use_openai=args.openai)
         
         if searches:
             print(f"  ✓ Generated {len(searches)} search queries")
@@ -119,7 +144,8 @@ def main():
                 "query_id": query_id,
                 "query": query_text,
                 "generated_searches": searches,
-                "status": "success"
+                "status": "success",
+                "model_type": model_type
             })
         else:
             print(f"  ✗ Failed: {error}")
@@ -128,20 +154,33 @@ def main():
                 "query": query_text,
                 "generated_searches": [],
                 "status": "error",
-                "error": error
+                "error": error,
+                "model_type": model_type
             })
         
     
-    # Final save
-    output_file = f"finetune_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    # Final save with model type in filename
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    model_suffix = "openai_gpt35turbo_instruct" if args.openai else "finetuned"
+    output_file = f"{model_suffix}_results_{timestamp}.json"
+    
     with open(output_file, 'w') as f:
         json.dump(results, f, indent=2)
     
     # Simple statistics
     success_count = sum(1 for r in results if r["status"] == "success")
+    elapsed_time = datetime.now() - start_time
     
     print(f"\nCompleted: {success_count}/{len(queries)} successful")
+    print(f"Elapsed time: {elapsed_time}")
     print(f"Results saved to: {output_file}")
+    
+    if args.openai:
+        print(f"\n💡 To compare with finetuned model, run:")
+        print(f"   python run_finetune_model.py --limit {len(queries)}")
+    else:
+        print(f"\n💡 To compare with OpenAI model, run:")
+        print(f"   python run_finetune_model.py --openai --limit {len(queries)}")
     
 if __name__ == "__main__":
     main()

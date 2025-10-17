@@ -86,6 +86,10 @@ def masked_solr_search(search_query: str, collection: str = "slack", rows: int =
     if not keywords:
         return [], 0
     
+    # Return empty result for queries with >6 words
+    if len(keywords) > 6:
+        return [], 0
+    
     # Try from all keywords down to 1 keyword
     for k in range(len(keywords), 0, -1):
         solr_query = build_combination_query(keywords, k)
