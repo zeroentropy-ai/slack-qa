@@ -8,6 +8,27 @@ import subprocess
 import sys
 import time
 from datetime import datetime
+from garbage import CHANNEL_ACTIVITY, TICKET_ACTIVITY, HELP_US_HELP
+
+# Combine all garbage document IDs
+GARBAGE_DOCUMENT_IDS = set(CHANNEL_ACTIVITY + TICKET_ACTIVITY + HELP_US_HELP)
+
+def load_qrels(qrels_file="./synthetic_data/Modal_Community_T031JJZ7Q6T/beir_format_individual_message/qrels.jsonl"):
+    """Load qrels for filtering garbage queries"""
+    qrels_by_query_id = {}
+    with open(qrels_file, 'r') as f:
+        for line in f:
+            if "{" in line:
+                qrel = json.loads(line)
+                query_id = qrel["query_id"]
+                if query_id not in qrels_by_query_id:
+                    qrels_by_query_id[query_id] = []
+                qrels_by_query_id[query_id].append(qrel)
+    return qrels_by_query_id
+
+def is_garbage_query(qrel_doc_ids):
+    """Check if a query targets garbage documents"""
+    return any(doc_id in GARBAGE_DOCUMENT_IDS for doc_id in qrel_doc_ids)
 
 def load_test_queries(queries_file="./synthetic_data/Modal_Community_T031JJZ7Q6T/beir_format_individual_message/queries.jsonl"):
     """Load all test queries"""
