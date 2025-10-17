@@ -13,7 +13,6 @@ import asyncio
 from masked_solr_library import masked_solr_search
 sys.path.append('..')
 from ai import AIRerankModel, ai_rerank
-from garbage import CHANNEL_ACTIVITY, TICKET_ACTIVITY, HELP_US_HELP
 
 # Solr configuration
 SOLR_COLLECTION = "slack"
@@ -24,13 +23,6 @@ RERANK_MODEL = AIRerankModel(
     model="zerank-1",
 )
 
-# Combine all garbage document IDs
-GARBAGE_DOCUMENT_IDS = set(CHANNEL_ACTIVITY + TICKET_ACTIVITY + HELP_US_HELP)
-
-
-def is_garbage_query(qrel_doc_ids: List[str]) -> bool:
-    """Check if a query targets garbage documents"""
-    return any(doc_id in GARBAGE_DOCUMENT_IDS for doc_id in qrel_doc_ids)
 
 
 def load_search_cache(cache_file: str = "solr_search_cache.json") -> Dict[str, Dict]:
@@ -340,21 +332,8 @@ async def main():
     documents = load_documents()
     search_cache = load_search_cache(args.cache_file)
     
-    # Filter out garbage queries
-    non_garbage_results = []
-    for result in successful_results:
-        query_id = result.get("query_id", f"query_{len(non_garbage_results)}")
-        qrels = qrels_by_query_id.get(query_id, [])
-        if qrels:
-            qrel_doc_ids = [qrel["document_id"] for qrel in qrels]
-            if not is_garbage_query(qrel_doc_ids):
-                non_garbage_results.append(result)
-    
-    print(f"Found {len(non_garbage_results)} non-garbage queries (filtered out {len(successful_results) - len(non_garbage_results)} garbage queries)")
-    successful_results = non_garbage_results
-    
     if not successful_results:
-        print("❌ No successful non-garbage results to evaluate")
+        print("❌ No successful results to evaluate")
         sys.exit(1)
     
     # Process queries

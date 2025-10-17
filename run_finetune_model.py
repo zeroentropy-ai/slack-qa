@@ -85,6 +85,22 @@ def main():
     queries = load_test_queries()
     print(f"Loaded {len(queries)} queries")
     
+    print("Loading qrels...")
+    qrels_by_query_id = load_qrels()
+    
+    # Filter out garbage queries
+    non_garbage_queries = {}
+    for query_id, query_data in queries.items():
+        qrels = qrels_by_query_id.get(query_id, [])
+        if qrels:
+            qrel_doc_ids = [qrel["document_id"] for qrel in qrels]
+            if not is_garbage_query(qrel_doc_ids):
+                non_garbage_queries[query_id] = query_data
+    
+    print(f"Filtered out {len(queries) - len(non_garbage_queries)} garbage queries")
+    print(f"Processing {len(non_garbage_queries)} non-garbage queries")
+    queries = non_garbage_queries
+    
     # Prepare output
     results = []
     start_time = datetime.now()
@@ -115,42 +131,17 @@ def main():
                 "error": error
             })
         
-        # Save progress every 20 queries
-        if (i + 1) % 20 == 0:
-            with open("fintune_results_progress.json", 'w') as f:
-                json.dump(results, f, indent=2)
-            print(f"  💾 Saved progress ({i+1} queries)")
     
     # Final save
     output_file = f"finetune_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     with open(output_file, 'w') as f:
         json.dump(results, f, indent=2)
     
-    # Statistics
-    end_time = datetime.now()
-    duration = (end_time - start_time).total_seconds()
+    # Simple statistics
     success_count = sum(1 for r in results if r["status"] == "success")
     
-    print("\n" + "="*60)
-    print("BENCHMARK COMPLETE")
-    print("="*60)
-    print(f"Total queries: {len(queries)}")
-    print(f"Successful: {success_count} ({success_count/len(queries)*100:.1f}%)")
-    print(f"Failed: {len(queries) - success_count}")
-    print(f"Time taken: {duration:.1f} seconds")
-    print(f"Avg time per query: {duration/len(queries):.2f} seconds")
-    print(f"\nResults saved to: {output_file}")
-    
-    # Save summary
-    summary = {
-        "total_queries": len(queries),
-        "successful": success_count,
-        "failed": len(queries) - success_count,
-        "duration_seconds": duration,
-        "avg_time_per_query": duration/len(queries),
-        "timestamp": datetime.now().isoformat(),
-        "output_file": output_file
-    }
+    print(f"\nCompleted: {success_count}/{len(queries)} successful")
+    print(f"Results saved to: {output_file}")
     
 if __name__ == "__main__":
     main()
