@@ -5,12 +5,13 @@ Can use either local finetuned model or OpenAI API with --openai flag
 """
 
 import json
-import subprocess
-import sys
-import time
 import argparse
+import asyncio
 from datetime import datetime
+from typing import List, Dict, Tuple
+from tqdm import tqdm
 from garbage import CHANNEL_ACTIVITY, TICKET_ACTIVITY, HELP_US_HELP
+from query_generators import generate_queries_local, generate_queries_openai
 
 # Combine all garbage document IDs
 GARBAGE_DOCUMENT_IDS = set(CHANNEL_ACTIVITY + TICKET_ACTIVITY + HELP_US_HELP)
@@ -42,59 +43,54 @@ def load_test_queries(queries_file="./synthetic_data/Modal_Community_T031JJZ7Q6T
                 queries[query["id"]] = query
     return queries
 
-def run_single_query(query_text, use_openai=False):
-    """Run the completions API script for a single query"""
-    try:
-        # Choose which script to run based on the flag
+async def process_query_async(semaphore: asyncio.Semaphore, query_id: str, query_text: str, use_openai: bool, model_type: str) -> Dict:
+    """Process a single query asynchronously with semaphore control"""
+    async with semaphore:
         if use_openai:
-            script_name = "call_openai_completions.py"
+            # Run OpenAI in thread pool to avoid blocking
+            loop = asyncio.get_event_loop()
+            searches, error = await loop.run_in_executor(None, generate_queries_openai, query_text)
         else:
-            script_name = "call_completions_api.py"
-            
-        # Run the script and capture output
-        result = subprocess.run(
-            ["python3", script_name, query_text],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
+            # Run local model in thread pool
+            loop = asyncio.get_event_loop()
+            searches, error = await loop.run_in_executor(None, generate_queries_local, query_text)
         
-        if result.returncode == 0:
-            # Parse the output from completions API
-            try:
-                output_lines = result.stdout.strip().split('\n')
-                
-                # Find the generated search queries line
-                generated_text = None
-                for line in output_lines:
-                    if line.startswith('[') and line.endswith(']'):
-                        generated_text = line
-                        break
-                
-                if generated_text:
-                    searches = json.loads(generated_text)
-                    return searches, None
-                else:
-                    # If no JSON found, return the raw output for debugging
-                    return None, f"No JSON found in output: {result.stdout}"
-                    
-            except json.JSONDecodeError:
-                return None, f"Invalid JSON: {result.stdout}"
+        if searches:
+            return {
+                "query_id": query_id,
+                "query": query_text,
+                "generated_searches": searches,
+                "status": "success",
+                "model_type": model_type
+            }
         else:
-            return None, f"Script error: {result.stderr}"
-            
-    except subprocess.TimeoutExpired:
-        return None, "Timeout after 30 seconds"
-    except Exception as e:
-        return None, f"Error: {str(e)}"
+            return {
+                "query_id": query_id,
+                "query": query_text,
+                "generated_searches": [],
+                "status": "error",
+                "error": error,
+                "model_type": model_type
+            }
 
-def main():
+def run_single_query(query_text: str, use_openai: bool = False) -> Tuple[List[str], str]:
+    """
+    Legacy function for backward compatibility (synchronous version)
+    """
+    if use_openai:
+        return generate_queries_openai(query_text)
+    else:
+        return generate_queries_local(query_text)
+
+async def main_async():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Run few-shot prompted model on test queries")
     parser.add_argument("--openai", action="store_true", 
                        help="Use OpenAI API instead of local finetuned model")
     parser.add_argument("--limit", type=int, default=None,
                        help="Limit number of queries to process (for testing)")
+    parser.add_argument("--parallel", action="store_true", default=True,
+                       help="Use parallel processing (default: True)")
     args = parser.parse_args()
     
     model_type = "OpenAI" if args.openai else "Finetuned"
@@ -126,42 +122,71 @@ def main():
         queries = dict(query_items)
         print(f"Limited to first {len(queries)} queries for testing")
     
-    # Prepare output
-    results = []
     start_time = datetime.now()
     
-    # Process each query
-    for i, (query_id, query_data) in enumerate(queries.items()):
-        query_text = query_data["query"]
-        print(f"\n[{i+1}/{len(queries)}] Processing: {query_text[:80]}...")
+    if args.parallel and args.openai:
+        # Use parallel processing with semaphore for OpenAI
+        print(f"Using parallel processing with semaphore of 16...")
+        semaphore = asyncio.Semaphore(16)
         
-        # Run the model
-        searches, error = run_single_query(query_text, use_openai=args.openai)
+        # Create tasks for all queries
+        tasks = []
+        for query_id, query_data in queries.items():
+            query_text = query_data["query"]
+            task = process_query_async(semaphore, query_id, query_text, args.openai, model_type)
+            tasks.append(task)
         
-        if searches:
-            print(f"  ✓ Generated {len(searches)} search queries")
-            results.append({
-                "query_id": query_id,
-                "query": query_text,
-                "generated_searches": searches,
-                "status": "success",
-                "model_type": model_type
-            })
-        else:
-            print(f"  ✗ Failed: {error}")
-            results.append({
-                "query_id": query_id,
-                "query": query_text,
-                "generated_searches": [],
-                "status": "error",
-                "error": error,
-                "model_type": model_type
-            })
+        # Process all queries with progress bar
+        results = []
+        with tqdm(total=len(tasks), desc="Processing queries") as pbar:
+            for coro in asyncio.as_completed(tasks):
+                result = await coro
+                results.append(result)
+                pbar.update(1)
+                
+                # Show status in progress bar
+                if result["status"] == "success":
+                    pbar.set_postfix({"✓": f"{len(result['generated_searches'])} queries"})
+                else:
+                    pbar.set_postfix({"✗": "Failed"})
+    
+    else:
+        # Use sequential processing (for local model or when parallel is disabled)
+        print("Using sequential processing...")
+        results = []
         
+        with tqdm(total=len(queries), desc="Processing queries") as pbar:
+            for query_id, query_data in queries.items():
+                query_text = query_data["query"]
+                
+                # Run the model
+                searches, error = run_single_query(query_text, use_openai=args.openai)
+                
+                if searches:
+                    results.append({
+                        "query_id": query_id,
+                        "query": query_text,
+                        "generated_searches": searches,
+                        "status": "success",
+                        "model_type": model_type
+                    })
+                    pbar.set_postfix({"✓": f"{len(searches)} queries"})
+                else:
+                    results.append({
+                        "query_id": query_id,
+                        "query": query_text,
+                        "generated_searches": [],
+                        "status": "error",
+                        "error": error,
+                        "model_type": model_type
+                    })
+                    pbar.set_postfix({"✗": "Failed"})
+                
+                pbar.update(1)
     
     # Final save with model type in filename
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    model_suffix = "openai_gpt35turbo_instruct" if args.openai else "finetuned"
+    model_suffix = "openai" if args.openai else "finetuned"
     output_file = f"{model_suffix}_results_{timestamp}.json"
     
     with open(output_file, 'w') as f:
@@ -181,6 +206,10 @@ def main():
     else:
         print(f"\n💡 To compare with OpenAI model, run:")
         print(f"   python run_finetune_model.py --openai --limit {len(queries)}")
+
+def main():
+    """Synchronous wrapper for async main"""
+    asyncio.run(main_async())
     
 if __name__ == "__main__":
     main()

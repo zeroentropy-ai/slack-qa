@@ -105,7 +105,7 @@ def load_data():
     documents = {}
     target_doc_by_query = {}
     
-    with open("./finetune_queries_training_data.json") as f:
+    with open("./mock-slack/training_data_step_0.json") as f:
         training_data = json.load(f)
     
     for item in training_data:
@@ -242,6 +242,13 @@ def get_target_rank(document_ids: List[str], target_doc_id: str):
     return None  # Not found
 
 
+
+## Functions
+
+run_model(model, query : Query, options : dict) -> SearchStrings
+run_local_searches(SearchStrings) -> [SearchResult | ErrorStr("str")]
+recall([SearchResult*]) -> {"recall": .., "positive_count": ..}
+
 async def generate_agent_action(
     query: str,
     target_preview: str,
@@ -254,7 +261,7 @@ async def generate_agent_action(
 
     try:
         response = await openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-5-mini",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": USER_PROMPT_TEMPLATE.format(
@@ -264,7 +271,6 @@ async def generate_agent_action(
                     current_step=current_step
                 )}
             ],
-            temperature=0.7
         )
 
         # Parse the response

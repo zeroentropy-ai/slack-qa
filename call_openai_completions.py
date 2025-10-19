@@ -67,9 +67,8 @@ def main():
         client = openai.OpenAI()
         
         # Make API request using the legacy completions endpoint
-        # Note: Using gpt-3.5-turbo-instruct as it supports the completions format
         response = client.completions.create(
-            model="gpt-3.5-turbo-instruct",  # Best model that supports completions API
+            model="gpt-5-mini",  # Best model that supports completions API
             prompt=prompt,
             max_tokens=150,
             temperature=0.3,
