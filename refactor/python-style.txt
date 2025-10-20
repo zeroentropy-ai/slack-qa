@@ -1,4 +1,7 @@
-- for long running scripts use tqdm to show a progress bar
+- for long running scripts use tqdm to show a progress bar, don't print at each step unless to report errors in the step.
 - never use `not collection` to see if a collection (list, set, dict, etc.) is empty. Always use len(list) == 0
+- the above applies also to checking if a string is empty.
 - never use `if not foo` to check if foo is None. Always use `foo is None`. Do this even if no other falsy value is possible.
-- if some error is supposed to stop a process, never catch it, let it bubble, if not print an error log and continue gracefully. Wherever possible use empty array or None value as fallback if error.
+- if some error is supposed to stop a process, never catch it, let it bubble, if not print an error log and continue gracefully. use simple null values as fallback on error and don't create contrived fallback values.
+- Don't use docstrings on small functions that are obviously understood
+- Do not leave comments that are describing your changes during an agent run
