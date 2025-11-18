@@ -20,6 +20,7 @@ Repository layout (important files)
 - `generate_query_sequential_version.py` — alternate sequential implementation
 - `ai.py` — internal AI wrapper used by the query generator (embeddings, calls)
 - `slack_search.py` — small wrapper around Slack search API (browser or app mode)
+- `assistant_search_context.py` — CLI helper to call Slack’s `assistant.search.context` API once you obtain an `action_token`
 - `validated_query_chunk_pairs_to_proper_json_format.py` — converts validated pairs to BEIR format
 - `requirements.txt` — Python dependencies used by the project
 - `test_boolean_slack_api.py`, `test_search_api_wrapper.py` — small tests / examples
@@ -61,6 +62,21 @@ Notes about AI and auth
 - `ai.py` centralizes calls to OpenAI/Anthropic and embedding models. Review it before running generation.
 - `generate_query.py` supports `provider` values like `openai` and `anthropic`. You must supply the corresponding API key.
 - Browser-mode Slack scripts require a valid `xoxc` token and full cookie string. App-mode uses `xoxp` and requires `search:read` and other scopes as appropriate.
+
+Assistant search context (Slack AI)
+-----------------------------------
+Slack’s [`assistant.search.context`](https://docs.slack.dev/reference/methods/assistant.search.context/) API requires an `action_token` that is only issued when your app subscribes to message events. The included FastAPI server (`slack_event_server.py`) captures the most recent token at `http://127.0.0.1:80/slack/action-token`, and the `assistant_search_context.py` helper makes invoking the API straightforward:
+
+1. Run the event receiver: `PORT=80 python3 slack_event_server.py`
+2. Expose it via ngrok (or your reverse proxy): `ngrok http 80`
+3. Configure Slack Event Subscriptions to point to `https://<your-tunnel>.ngrok-free.app/slack/events` and subscribe to events such as `message.im`, `message.channels`, and `app_mention`.
+4. After Slack confirms the Request URL, send a DM or mention to generate an `action_token`.
+5. Invoke the assistant search helper:
+   ```bash
+   export SLACK_BOT_TOKEN="xoxb-..."
+   python assistant_search_context.py --query "mobile UX revamp roadmap"
+   ```
+   You can also pass `--action-token <token>` explicitly or let the script fetch it from the FastAPI helper (`--action-token-url`).
 
 evals format export
 - Use `validated_query_chunk_pairs_to_proper_json_format.py` to convert `validated_query_chunk_pairs.jsonl` into `documents.jsonl`, `queries.jsonl`, and `qrels.jsonl` for retrieval evaluation.
